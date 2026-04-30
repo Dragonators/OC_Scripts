@@ -1,0 +1,31 @@
+# IDE / editor metadata
+.idea/
+*.iml
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and runtime output
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Lua compiled artifacts
+*.luac
+
+# Local archives or packaged exports
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
