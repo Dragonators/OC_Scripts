@@ -37,6 +37,7 @@ end
 local config = loadConfig(configPath)
 local states = {}
 local proxyCache = {}
+local hatchRuntime = {}
 
 local function listContains(list, value)
   for _, item in ipairs(list or {}) do
@@ -194,6 +195,8 @@ local function deriveFromPattern(groupIndex, group)
   gs.derived = {
     product = {label = output.label, count = output.count},
     radioItem = radioItem,
+    radioIndex = radioIndex,
+    pattern = {address = patternSpec.address, slot = patternSpec.slot or 1},
     required = required
   }
   gs.nextPattern = now + ((config.intervals or {}).pattern or 60)
@@ -392,6 +395,15 @@ local function hatchSpec(hatchId)
   return shallowMerge((config.defaults or {}).hatch, hatch)
 end
 
+local function databaseAddress()
+  local database = config.database or {}
+  return resolveAddress("database", database.address, true)
+end
+
+local function databaseEntry()
+  return (config.database or {}).entry or 1
+end
+
 local function hatchesFor(group, machineIndex, machine)
   if machine.hatches then return machine.hatches end
   if machine.hatch then return {machine.hatch} end
@@ -408,71 +420,91 @@ local function hatchesFor(group, machineIndex, machine)
   return group.hatches or {}
 end
 
-local function countItem(transposer, side, wanted)
-  local total = 0
-  local size = checkedCall(transposer, "getInventorySize", side) or 0
-  for slot = 1, size do
-    local stack = checkedCall(transposer, "getStackInSlot", side, slot)
-    if namesMatch(stack, wanted) then
-      total = total + stackSize(stack)
-    end
-  end
-  return total
+local function ioHubFor(spec)
+  return proxyFor("iohub", spec.ioHub or spec.address)
 end
 
-local function moveMatching(transposer, fromSide, toSide, wanted, count)
-  local moved = 0
-  local size = checkedCall(transposer, "getInventorySize", fromSide) or 0
-  for slot = 1, size do
-    if moved >= count then break end
-    local stack = checkedCall(transposer, "getStackInSlot", fromSide, slot)
-    if namesMatch(stack, wanted) then
-      local request = math.min(count - moved, stackSize(stack))
-      local transferred = checkedCall(transposer, "transferItem", fromSide, toSide, request, slot) or 0
-      moved = moved + transferred
-    end
-  end
-  return moved
+local function storeRadioDescriptor(derived)
+  if not derived.radioIndex then return false end
+  local iface = proxyFor("me_interface", derived.pattern.address)
+  checkedCall(iface, "storeInterfacePatternInput", derived.pattern.slot, derived.radioIndex, databaseAddress(), databaseEntry())
+  return true
 end
 
-local function removeMismatched(transposer, fromSide, toSide, wanted)
-  local size = checkedCall(transposer, "getInventorySize", fromSide) or 0
-  for slot = 1, size do
-    local stack = checkedCall(transposer, "getStackInSlot", fromSide, slot)
-    if stack and not namesMatch(stack, wanted) then
-      checkedCall(transposer, "transferItem", fromSide, toSide, stackSize(stack), slot)
-    end
+local function hubSlot(spec)
+  return spec.bufferSlot or spec.inventorySlot or 1
+end
+
+local function hatchSlot(spec)
+  return spec.hatchSlot or spec.slot or 1
+end
+
+local function selectHubSlot(hub, spec)
+  checkedCall(hub, "select", hubSlot(spec))
+end
+
+local function flushHubSlot(hub, spec)
+  selectHubSlot(hub, spec)
+  local count = tonumber(checkedCall(hub, "count")) or 0
+  if count > 0 then
+    checkedCall(hub, "sendItems", count)
   end
 end
 
-local function ensureHatch(hatchId, wanted)
+local function requestRadioItem(spec, derived)
+  if not storeRadioDescriptor(derived) then return false end
+  local hub = ioHubFor(spec)
+  flushHubSlot(hub, spec)
+
+  local amount = spec.amount or 1
+  local requested = tonumber(checkedCall(hub, "requestItems", databaseAddress(), databaseEntry(), amount)) or 0
+  if requested <= 0 then return false end
+
+  local dropped = checkedCall(hub, "dropIntoSlot", spec.side, hatchSlot(spec), requested)
+  if dropped == true or (tonumber(dropped) or 0) > 0 then
+    return true
+  end
+
+  flushHubSlot(hub, spec)
+  return false
+end
+
+local function ensureHatch(hatchId, derived)
+  local wanted = derived.radioItem
   if not wanted then return true end
   local spec = hatchSpec(hatchId)
-  local transposer = proxyFor("transposer", spec.transposer)
+  local runtime = hatchRuntime[hatchId] or {nextFeed = 0}
+  hatchRuntime[hatchId] = runtime
+  local now = computer.uptime()
+  if now < (runtime.nextFeed or 0) then return true end
 
-  if spec.exclusive then
-    removeMismatched(transposer, spec.hatchSide, spec.sourceSide, wanted)
+  local ok = requestRadioItem(spec, derived)
+  if ok then
+    runtime.nextFeed = now + (spec.refeedInterval or spec.feedInterval or 60)
   end
-
-  local target = spec.targetCount or 1
-  local current = countItem(transposer, spec.hatchSide, wanted)
-  if current >= target then return true end
-
-  local sourceCount = countItem(transposer, spec.sourceSide, wanted)
-  if sourceCount < (spec.sourceMin or 1) then return false end
-
-  moveMatching(transposer, spec.sourceSide, spec.hatchSide, wanted, target - current)
-  return countItem(transposer, spec.hatchSide, wanted) >= target
+  return ok
 end
 
-local function removeHatch(hatchId, wanted)
-  if not wanted then return end
+local function removeHatch(hatchId, derived)
+  if not derived.radioItem then return end
   local spec = hatchSpec(hatchId)
+  local runtime = hatchRuntime[hatchId] or {}
+  hatchRuntime[hatchId] = runtime
+  runtime.nextFeed = 0
+
   if spec.removeOnStop == false then return end
-  local transposer = proxyFor("transposer", spec.transposer)
-  local current = countItem(transposer, spec.hatchSide, wanted)
-  if current > 0 then
-    moveMatching(transposer, spec.hatchSide, spec.sourceSide, wanted, current)
+
+  local ok, err = pcall(function()
+    local hub = ioHubFor(spec)
+    flushHubSlot(hub, spec)
+    selectHubSlot(hub, spec)
+    local sucked = checkedCall(hub, "suckFromSlot", spec.side, hatchSlot(spec), spec.removeAmount or 64)
+    if sucked == true or (tonumber(sucked) or 0) > 0 then
+      flushHubSlot(hub, spec)
+    end
+  end)
+  if not ok then
+    log("warn", "cannot reclaim radio item for hatch " .. tostring(hatchId) .. ": " .. tostring(err))
   end
 end
 
@@ -491,7 +523,7 @@ local function ensureMachineHatches(group, machineIndex, machine, derived)
   if not derived.radioItem then return true end
   local ok = true
   for _, hatchId in ipairs(hatchesFor(group, machineIndex, machine)) do
-    if not ensureHatch(hatchId, derived.radioItem) then ok = false end
+    if not ensureHatch(hatchId, derived) then ok = false end
   end
   return ok
 end
@@ -500,7 +532,7 @@ local function removeMachineHatches(groupIndex, group, machineIndex, machine, de
   if not derived.radioItem then return end
   for _, hatchId in ipairs(hatchesFor(group, machineIndex, machine)) do
     if not machineKeepsHatch(groupIndex, group, machineIndex, hatchId, now) then
-      removeHatch(hatchId, derived.radioItem)
+      removeHatch(hatchId, derived)
     end
   end
 end
@@ -673,7 +705,7 @@ local function validate()
         "group " .. tostring(group.name or groupIndex) .. " machine " .. tostring(machine.name or machineIndex) .. " active")
       for _, hatchId in ipairs(hatchesFor(group, machineIndex, machine)) do
         local spec = hatchSpec(hatchId)
-        proxyFor("transposer", spec.transposer)
+        ioHubFor(spec)
       end
     end
     deriveFromPattern(groupIndex, group)

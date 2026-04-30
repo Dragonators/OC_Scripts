@@ -13,7 +13,9 @@
 * 一个 `group` 内可以有一台或多台培养缸，也可以有一个或多个放射仓。
 * 机器开关不再通过 Adapter 直接控制机器，而是由 `group.control` 控制 GT 无线红石频率，再由无线控制覆盖版绑定到机器。
 * 机器是否真的在工序中，默认由 `group.active` 读取 GT 无线红石频率。推荐由这一组的设备活跃探测无线覆盖版输出该信号。
+* 放射材料通过 Programmable Hatches 的 IO Hub 从 AE 网络直接请求，再推入相邻放射仓。
 * 不再使用 `gt_energyContainer`，也不依赖通用 GT 机器进度 API。
+* 需要一个 OC Database 组件，程序用它临时保存样板中的放射材料描述，供 IO Hub 的 `requestItems` 使用。Database 只需要在同一个 OC 网络里，不需要安装到 IO Hub 上。
 
 ## GT 无线红石
 
@@ -67,12 +69,16 @@ active = {
 * 任一值为 `nil` 时，对应方向的自动切换禁用。
 * 如果达到开机条件但样板普通输入不足，程序会保持停机并按 `intervals.product` 周期重新检查。
 
+配置里的时间单位都是秒，不是 tick。包括 `intervals.*`、`work.startGrace`、`work.retryInterval` 和 `hatch.refeedInterval`。
+
 ## 放射仓逻辑
 
-* 组已开机、样板普通输入充足、组处于启动宽限或活跃状态时，程序会让组内机器对应的放射仓保持 `targetCount` 份放射材料。
-* 组级活跃信号消失且超过 `work.startGrace` 后，程序会回收该组对应放射仓内的放射材料。
+* 组已开机、样板普通输入充足、组处于启动宽限或活跃状态时，程序会调用 IO Hub 的 `requestItems(database, entry, amount)` 从 AE 网络请求放射材料，再用 `dropIntoSlot(side, hatchSlot, amount)` 推入放射仓。
+* 组级活跃信号消失且超过 `work.startGrace` 后，程序会尝试 `suckFromSlot` 把放射仓槽位中的物品吸回 IO Hub，并用 `sendItems` 送回 AE。
 * 如果原料恢复但组仍未活跃，程序会按 `work.retryInterval` 周期重新短暂投放放射材料，给机器重新进入工序的机会。
 * 如果多个机器共享同一个放射仓，只要共享者中仍有机器活跃或处于启动宽限，程序不会回收该放射仓材料。
+* IO Hub API 不能直接读取放射仓内已有目标物品数量，所以程序使用 `hatch.refeedInterval` 做周期补料。该值应小于等于放射材料单份可持续时间。
+* Database Upgrade 可以放在 OpenComputers Adapter 的升级槽中，并把 Adapter 接到同一个 OC 网络。IO Hub 的源码会通过 `node().network().node(address)` 找这个 database 组件。
 
 ## 配置映射
 

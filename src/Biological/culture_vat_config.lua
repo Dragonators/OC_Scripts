@@ -6,7 +6,10 @@
 --   2. 电脑安装 Programmable Hatches 的 GT Redstone Card，用它直接读写 GT 无线红石频率。
 --      每个机器组的 frequency 绑定无线控制覆盖版，用来开关一批培养缸。
 --   3. 每台培养缸安装设备活跃探测无线覆盖版，把“机器正在工序中”的状态发到 GT 无线红石频率。
---   4. 每个放射仓旁放一个转运器，转运器一侧接放射仓，一侧接 AE 接口/箱子缓冲放射材料。
+--   4. 每个放射仓旁放一个 Programmable Hatches 的 IO Hub。
+--      OC 通过 IO Hub 的 requestItems 从 AE 网络请求放射材料，再推入相邻放射仓。
+--   5. OC 网络里需要一个 Database 组件，用于临时保存样板中的放射材料描述。
+--      Database 不需要安装在 IO Hub 上；可以把 Database Upgrade 放进 Adapter 的升级槽并接入同一 OC 网络。
 --
 -- 样板模式：
 --   group.pattern 指向 ME 接口里的编码处理样板。
@@ -21,8 +24,9 @@ local sides = require("sides")
 
 return {
   intervals = {
+    -- 本配置中所有时间单位都是秒，不是 tick。
     product = 20, -- AE 产物流体阈值检测间隔，越大越省性能
-    machine = 5,  -- 机器活跃信号与放射仓投料/回收检测间隔
+    machine = 5,  -- 机器活跃信号与放射仓投料检测间隔
     pattern = 60, -- 重新读取样板间隔；换样板后最多等待这个时间生效
     status = 10,  -- 状态输出间隔；设为 false 可关闭
     loop = 1
@@ -32,6 +36,14 @@ return {
     -- ME 控制器或 ME 接口组件地址前缀；nil 表示自动寻找唯一的 me_controller/me_interface。
     address = nil,
     preferredTypes = {"me_controller", "me_interface"}
+  },
+
+  database = {
+    -- OC Database 组件地址前缀；nil 表示唯一 database 组件。
+    -- 它只需要和 IO Hub/电脑在同一个 OC 网络，不需要也不能安装到 IO Hub 内部。
+    -- 程序会把样板最后一个 64 输入临时写入该槽，再交给 IO Hub 的 requestItems 使用。
+    address = nil,
+    entry = 1
   },
 
   defaults = {
@@ -69,10 +81,14 @@ return {
     },
 
     hatch = {
-      targetCount = 1,     -- 机器运行时放射仓内保持的目标数量
-      removeOnStop = true, -- 机器关闭、不活跃或原料不足时是否把匹配材料移回 sourceSide
-      sourceMin = 1,       -- sourceSide 至少有这么多才向放射仓投料
-      exclusive = true     -- true 时，投料前会尝试清理放射仓内不匹配物品
+      -- IO Hub API 不提供目标放射仓库存计数，因此这里按周期进行单次投料脉冲。
+      -- 该值应小于等于放射材料单份可持续时间；过小会增加 IO Hub 调用频率。
+      refeedInterval = 60,
+      amount = 1,       -- 每次从 AE 请求并推入放射仓的数量
+      bufferSlot = 1,   -- IO Hub 内部物品槽；程序会临时占用并在必要时送回 AE
+      hatchSlot = 1,    -- 放射仓目标槽
+      removeOnStop = true,
+      removeAmount = 64 -- 机器停止/断料时尝试从放射仓吸回的最大数量
     },
 
     work = {
@@ -82,17 +98,18 @@ return {
   },
 
   -- 放射仓资源定义。
-  -- transposer/sourceSide/hatchSide 是物理布线；放射材料名称由组样板最后一个 64 输入自动推导。
+  -- ioHub 是 IO Hub 组件地址前缀；side 是 IO Hub 面向放射仓的方向。
+  -- 放射材料名称由组样板最后一个 64 输入自动推导。
   hatches = {
     radio_a = {
-      transposer = "CHANGE_ME_TP_A",
-      sourceSide = sides.west,
-      hatchSide = sides.east
+      ioHub = "CHANGE_ME_IOHUB_A",
+      side = sides.east,
+      hatchSlot = 1
     },
     radio_b = {
-      transposer = "CHANGE_ME_TP_B",
-      sourceSide = sides.west,
-      hatchSide = sides.east
+      ioHub = "CHANGE_ME_IOHUB_B",
+      side = sides.east,
+      hatchSlot = 1
     }
   },
 
