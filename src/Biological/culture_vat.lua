@@ -38,13 +38,7 @@ local config = loadConfig(configPath)
 local states = {}
 local proxyCache = {}
 local hatchRuntime = {}
-
-local function listContains(list, value)
-  for _, item in ipairs(list or {}) do
-    if item == value then return true end
-  end
-  return false
-end
+local groupHatches
 
 local function itemName(item)
   if not item then return nil end
@@ -64,6 +58,22 @@ end
 local function namesMatch(stackOrEntry, wanted)
   local left = stackName(stackOrEntry)
   local right = itemName(wanted)
+  return left ~= nil and right ~= nil and left == right
+end
+
+local function normalizeFluidName(name)
+  if not name then return nil end
+  local normalized = tostring(name):lower()
+  normalized = normalized:gsub("^%s+", ""):gsub("%s+$", "")
+  normalized = normalized:gsub("^fluid%s+drops?%s+of%s+", "")
+  normalized = normalized:gsub("^drops?%s+of%s+", "")
+  return normalized
+end
+
+local function fluidNamesMatch(stackOrEntry, wanted)
+  if namesMatch(stackOrEntry, wanted) then return true end
+  local left = normalizeFluidName(stackName(stackOrEntry))
+  local right = normalizeFluidName(itemName(wanted))
   return left ~= nil and right ~= nil and left == right
 end
 
@@ -203,7 +213,7 @@ local function deriveFromPattern(groupIndex, group)
 
   local radioText = radioItem and radioItem.label or "none"
   log("info", string.format("group %s pattern: product=%s, radio=%s, inputs=%d",
-    tostring(group.name or groupIndex), output.label, radioText, #required))
+          tostring(group.name or groupIndex), output.label, radioText, #required))
   return gs.derived
 end
 
@@ -217,10 +227,20 @@ local function amountInEntries(entries, wanted, amountField)
   return total
 end
 
+local function fluidAmountInEntries(entries, wanted, amountField)
+  local total = 0
+  for _, entry in ipairs(entries or {}) do
+    if fluidNamesMatch(entry, wanted) then
+      total = total + (tonumber(entry[amountField]) or stackSize(entry))
+    end
+  end
+  return total
+end
+
 local function fluidAmount(wanted)
   local ae = aeProxy()
   local fluids = checkedCall(ae, "getFluidsInNetwork")
-  return amountInEntries(fluids, wanted, "amount")
+  return fluidAmountInEntries(fluids, wanted, "amount")
 end
 
 local function itemAmount(wanted)
@@ -286,21 +306,9 @@ end
 
 local function radioAvailable(group, derived)
   if not derived.radioItem then return true end
-  local seen = {}
   local needed = 0
-  for index, machine in ipairs(group.machines or {}) do
-    local hatches = machine.hatches or (machine.hatch and {machine.hatch}) or {}
-    if #hatches == 0 and group.hatches and #group.hatches == #(group.machines or {}) then
-      hatches = {group.hatches[index]}
-    elseif #hatches == 0 then
-      hatches = group.hatches or {}
-    end
-    for _, hatchId in ipairs(hatches) do
-      if not seen[hatchId] then
-        seen[hatchId] = true
-        needed = needed + 1
-      end
-    end
+  for _ in ipairs(groupHatches(group)) do
+    needed = needed + 1
   end
   if needed == 0 then return true end
   local have = itemAmount(derived.radioItem)
@@ -339,6 +347,12 @@ local function validateSignalSpec(spec, label)
   signalComponent(spec)
   if mode == "gt_wireless" and not spec.frequency then
     error(label .. " requires frequency for GT wireless redstone")
+  end
+end
+
+local function validateThresholds(thresholds, label)
+  if thresholds.upper and thresholds.lower and thresholds.upper < thresholds.lower then
+    error(label .. " thresholds.upper must be greater than or equal to thresholds.lower")
   end
 end
 
@@ -404,20 +418,16 @@ local function databaseEntry()
   return (config.database or {}).entry or 1
 end
 
-local function hatchesFor(group, machineIndex, machine)
-  if machine.hatches then return machine.hatches end
-  if machine.hatch then return {machine.hatch} end
-  if group.machineHatches then
-    local mapped = group.machineHatches[machine.name] or group.machineHatches[machineIndex]
-    if mapped then
-      if type(mapped) == "table" then return mapped end
-      return {mapped}
+function groupHatches(group)
+  local result = {}
+  local seen = {}
+  for _, hatchId in ipairs(group.hatches or {}) do
+    if not seen[hatchId] then
+      seen[hatchId] = true
+      result[#result + 1] = hatchId
     end
   end
-  if group.hatches and group.assignHatchesByIndex ~= false and #group.hatches == #(group.machines or {}) then
-    return {group.hatches[machineIndex]}
-  end
-  return group.hatches or {}
+  return result
 end
 
 local function ioHubFor(spec)
@@ -451,14 +461,31 @@ local function flushHubSlot(hub, spec)
   end
 end
 
+local function hatchTargetCount(spec)
+  return spec.targetCount or 1
+end
+
+local function hatchSlotSize(hub, spec)
+  return tonumber(checkedCall(hub, "getSlotStackSize", spec.side, hatchSlot(spec))) or 0
+end
+
+local function hatchSlotMatchesRadio(hub, spec)
+  return checkedCall(hub, "compareStackToDatabase", spec.side, hatchSlot(spec), databaseAddress(), databaseEntry(), false) and true or false
+end
+
 local function requestRadioItem(spec, derived)
-  if not storeRadioDescriptor(derived) then return false end
+  if not storeRadioDescriptor(derived) then
+    return false, "pattern has no radio item"
+  end
   local hub = ioHubFor(spec)
   flushHubSlot(hub, spec)
 
-  local amount = spec.amount or 1
+  local amount = math.min(spec.requestAmount or spec.amount or 1, hatchTargetCount(spec))
   local requested = tonumber(checkedCall(hub, "requestItems", databaseAddress(), databaseEntry(), amount)) or 0
-  if requested <= 0 then return false end
+  if requested <= 0 then
+    return false, string.format("hatch=%s cannot request %s from AE via IO Hub %s",
+            tostring(spec.id or "?"), itemName(derived.radioItem), tostring(spec.ioHub or spec.address))
+  end
 
   local dropped = checkedCall(hub, "dropIntoSlot", spec.side, hatchSlot(spec), requested)
   if dropped == true or (tonumber(dropped) or 0) > 0 then
@@ -466,7 +493,8 @@ local function requestRadioItem(spec, derived)
   end
 
   flushHubSlot(hub, spec)
-  return false
+  return false, string.format("hatch=%s cannot drop %s into side=%s slot=%s requested=%d",
+          tostring(spec.id or "?"), itemName(derived.radioItem), tostring(spec.side), tostring(hatchSlot(spec)), requested)
 end
 
 local function ensureHatch(hatchId, derived)
@@ -478,62 +506,63 @@ local function ensureHatch(hatchId, derived)
   local now = computer.uptime()
   if now < (runtime.nextFeed or 0) then return true end
 
-  local ok = requestRadioItem(spec, derived)
+  spec.id = hatchId
+  if not storeRadioDescriptor(derived) then
+    return false, "pattern has no radio item"
+  end
+
+  local hub = ioHubFor(spec)
+  local target = hatchTargetCount(spec)
+  local current = hatchSlotSize(hub, spec)
+  if current > 0 then
+    if not hatchSlotMatchesRadio(hub, spec) then
+      local message = string.format("hatch=%s slot=%s contains a different item; radio feed skipped",
+              tostring(hatchId), tostring(hatchSlot(spec)))
+      log("error", message)
+      runtime.nextFeed = now + (spec.refeedInterval or spec.feedInterval or 60)
+      return false, message
+    end
+    if current > target then
+      log("warn", string.format("hatch=%s contains %d radio items, target=%d; radio feed skipped",
+              tostring(hatchId), current, target))
+    end
+    runtime.nextFeed = now + (spec.refeedInterval or spec.feedInterval or 60)
+    return true
+  end
+
+  local ok, why = requestRadioItem(spec, derived)
   if ok then
     runtime.nextFeed = now + (spec.refeedInterval or spec.feedInterval or 60)
   end
-  return ok
+  return ok, why
 end
 
 local function removeHatch(hatchId, derived)
   if not derived.radioItem then return end
-  local spec = hatchSpec(hatchId)
   local runtime = hatchRuntime[hatchId] or {}
   hatchRuntime[hatchId] = runtime
   runtime.nextFeed = 0
-
-  if spec.removeOnStop == false then return end
-
-  local ok, err = pcall(function()
-    local hub = ioHubFor(spec)
-    flushHubSlot(hub, spec)
-    selectHubSlot(hub, spec)
-    local sucked = checkedCall(hub, "suckFromSlot", spec.side, hatchSlot(spec), spec.removeAmount or 64)
-    if sucked == true or (tonumber(sucked) or 0) > 0 then
-      flushHubSlot(hub, spec)
-    end
-  end)
-  if not ok then
-    log("warn", "cannot reclaim radio item for hatch " .. tostring(hatchId) .. ": " .. tostring(err))
-  end
 end
 
-local function machineKeepsHatch(groupIndex, group, machineIndex, hatchId, now)
-  local gs = groupState(groupIndex)
-  for index, machine in ipairs(group.machines or {}) do
-    if index ~= machineIndex and listContains(hatchesFor(group, index, machine), hatchId) then
-      local ms = gs.machines[index]
-      if ms and (ms.lastActive or now < (ms.graceUntil or 0)) then return true end
-    end
-  end
-  return false
-end
-
-local function ensureMachineHatches(group, machineIndex, machine, derived)
+local function ensureGroupHatches(group, derived)
   if not derived.radioItem then return true end
   local ok = true
-  for _, hatchId in ipairs(hatchesFor(group, machineIndex, machine)) do
-    if not ensureHatch(hatchId, derived) then ok = false end
+  local reasons = {}
+  for _, hatchId in ipairs(groupHatches(group)) do
+    local hatchOk, why = ensureHatch(hatchId, derived)
+    if not hatchOk then
+      ok = false
+      reasons[#reasons + 1] = why or tostring(hatchId)
+    end
   end
-  return ok
+  if ok then return true end
+  return false, table.concat(reasons, "; ")
 end
 
-local function removeMachineHatches(groupIndex, group, machineIndex, machine, derived, now)
+local function stopGroupHatchFeed(group, derived)
   if not derived.radioItem then return end
-  for _, hatchId in ipairs(hatchesFor(group, machineIndex, machine)) do
-    if not machineKeepsHatch(groupIndex, group, machineIndex, hatchId, now) then
-      removeHatch(hatchId, derived)
-    end
+  for _, hatchId in ipairs(groupHatches(group)) do
+    removeHatch(hatchId, derived)
   end
 end
 
@@ -568,12 +597,14 @@ local function startGroup(groupIndex, group, reason)
 
   local now = computer.uptime()
   local work = groupWork(group)
+  local hatchesOk, hatchWhy = ensureGroupHatches(group, derived)
+  if not hatchesOk then
+    log("warn", string.format("group %s not started: cannot prefill radio hatches",
+            tostring(group.name or groupIndex)) .. (hatchWhy and (": " .. hatchWhy) or ""))
+    return false
+  end
+
   for index, machine in ipairs(group.machines or {}) do
-    if not ensureMachineHatches(group, index, machine, derived) then
-      log("warn", string.format("group %s not started: cannot prefill radio hatch for %s",
-        tostring(group.name or groupIndex), tostring(machine.name or index)))
-      return false
-    end
     local ms = machineState(groupIndex, index)
     ms.graceUntil = now + (work.startGrace or 30)
     ms.retryAt = now + (work.retryInterval or 60)
@@ -586,9 +617,8 @@ end
 
 local function stopGroup(groupIndex, group, reason)
   local derived = deriveFromPattern(groupIndex, group)
-  local now = computer.uptime()
+  stopGroupHatchFeed(group, derived)
   for index, machine in ipairs(group.machines or {}) do
-    removeMachineHatches(groupIndex, group, index, machine, derived, now)
     local ms = machineState(groupIndex, index)
     ms.graceUntil = 0
     ms.lastActive = false
@@ -617,11 +647,11 @@ local function machineCheck(groupIndex, group)
   local work = groupWork(group)
 
   if not enabled then
+    stopGroupHatchFeed(group, derived)
     for index, machine in ipairs(group.machines or {}) do
       local ms = machineState(groupIndex, index)
       ms.lastActive = false
       ms.graceUntil = 0
-      removeMachineHatches(groupIndex, group, index, machine, derived, now)
     end
     return
   end
@@ -632,17 +662,19 @@ local function machineCheck(groupIndex, group)
       stopGroup(groupIndex, group, "input missing: " .. why)
       return
     end
+    stopGroupHatchFeed(group, derived)
     for index, machine in ipairs(group.machines or {}) do
       local ms = machineState(groupIndex, index)
       ms.lastActive = false
       ms.graceUntil = 0
-      removeMachineHatches(groupIndex, group, index, machine, derived, now)
     end
-    log("warn", string.format("group %s input missing, hatches held empty: %s", tostring(group.name or groupIndex), why))
+    log("warn", string.format("group %s input missing, hatch feeding stopped: %s", tostring(group.name or groupIndex), why))
     return
   end
 
   local sharedActive = sharedGroupActive(group)
+  local shouldFeed = false
+  local shouldRetry = false
   for index, machine in ipairs(group.machines or {}) do
     local ms = machineState(groupIndex, index)
     local active
@@ -654,18 +686,26 @@ local function machineCheck(groupIndex, group)
     ms.lastActive = active
 
     if active or now < (ms.graceUntil or 0) then
-      if not ensureMachineHatches(group, index, machine, derived) then
-        log("warn", string.format("group %s machine %s cannot fill radio hatch", tostring(group.name or groupIndex), tostring(machine.name or index)))
-      end
+      shouldFeed = true
     else
-      removeMachineHatches(groupIndex, group, index, machine, derived, now)
       if now >= (ms.retryAt or 0) then
         ms.graceUntil = now + (work.startGrace or 30)
         ms.retryAt = now + (work.retryInterval or 60)
-        ensureMachineHatches(group, index, machine, derived)
-        log("info", string.format("group %s machine %s retrying radio feed", tostring(group.name or groupIndex), tostring(machine.name or index)))
+        shouldFeed = true
+        shouldRetry = true
       end
     end
+  end
+  if shouldFeed then
+    local hatchesOk, hatchWhy = ensureGroupHatches(group, derived)
+    if not hatchesOk then
+      log("warn", string.format("group %s cannot fill radio hatches", tostring(group.name or groupIndex)) ..
+              (hatchWhy and (": " .. hatchWhy) or ""))
+    elseif shouldRetry then
+      log("info", string.format("group %s retrying radio feed", tostring(group.name or groupIndex)))
+    end
+  else
+    stopGroupHatchFeed(group, derived)
   end
 end
 
@@ -685,8 +725,8 @@ local function statusLine(groupIndex, group)
     if machineIsActive then active = active + 1 end
   end
   log("stat", string.format("group=%s enabled=%s active=%d/%d product=%s amount=%d radio=%s",
-    tostring(group.name or groupIndex), tostring(enabled), active, #(group.machines or {}),
-    itemName(derived.product), amount, derived.radioItem and itemName(derived.radioItem) or "none"))
+          tostring(group.name or groupIndex), tostring(enabled), active, #(group.machines or {}),
+          itemName(derived.product), amount, derived.radioItem and itemName(derived.radioItem) or "none"))
 end
 
 local function validate()
@@ -696,19 +736,23 @@ local function validate()
   aeProxy()
   for groupIndex, group in ipairs(config.groups) do
     validateSignalSpec(groupControl(group), "group " .. tostring(group.name or groupIndex) .. " control")
+    validateThresholds(groupThresholds(group), "group " .. tostring(group.name or groupIndex))
     if type(group.machines) ~= "table" or #group.machines == 0 then
       error("group " .. tostring(group.name or groupIndex) .. " must contain machines")
     end
     for machineIndex, machine in ipairs(group.machines) do
       validateSignalSpec(
-        machineActiveSpec(group, machine),
-        "group " .. tostring(group.name or groupIndex) .. " machine " .. tostring(machine.name or machineIndex) .. " active")
-      for _, hatchId in ipairs(hatchesFor(group, machineIndex, machine)) do
-        local spec = hatchSpec(hatchId)
-        ioHubFor(spec)
-      end
+              machineActiveSpec(group, machine),
+              "group " .. tostring(group.name or groupIndex) .. " machine " .. tostring(machine.name or machineIndex) .. " active")
     end
-    deriveFromPattern(groupIndex, group)
+    for _, hatchId in ipairs(groupHatches(group)) do
+      local spec = hatchSpec(hatchId)
+      ioHubFor(spec)
+    end
+    local derived = deriveFromPattern(groupIndex, group)
+    if derived.radioItem and #groupHatches(group) == 0 then
+      error("group " .. tostring(group.name or groupIndex) .. " pattern requires radio hatches")
+    end
   end
 end
 

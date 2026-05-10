@@ -1,99 +1,137 @@
 # 培养缸放射仓自动化
 
-文件：
+本目录包含 OpenComputers / GTNH 环境下使用的培养缸放射仓自动化脚本。
 
-* `culture_vat.lua`：OpenOS 主程序。
-* `culture_vat_config.lua`：中文配置样例。
+- `culture_vat.lua`：主程序，复制到 OpenOS 电脑后运行。
+- `../culture_vat_config.lua`：示例配置，可复制为 `/etc/culture_vat_config.lua` 后修改。
 
-## 当前模型
-
-程序只使用样板模式，并按“机器组”管理：
-
-* 一个 `group` 对应一个 AE 编码处理样板、一套产物流体阈值、一个组控制 GT 无线红石频率。
-* 一个 `group` 内可以有一台或多台培养缸，也可以有一个或多个放射仓。
-* 机器开关不再通过 Adapter 直接控制机器，而是由 `group.control` 控制 GT 无线红石频率，再由无线控制覆盖版绑定到机器。
-* 机器是否真的在工序中，默认由 `group.active` 读取 GT 无线红石频率。推荐由这一组的设备活跃探测无线覆盖版输出该信号。
-* 放射材料通过 Programmable Hatches 的 IO Hub 从 AE 网络直接请求，再推入相邻放射仓。
-* 不再使用 `gt_energyContainer`，也不依赖通用 GT 机器进度 API。
-* 需要一个 OC Database 组件，程序用它临时保存样板中的放射材料描述，供 IO Hub 的 `requestItems` 使用。Database 只需要在同一个 OC 网络里，不需要安装到 IO Hub 上。
-
-## GT 无线红石
-
-如果安装了 Programmable Hatches，推荐在 OC 电脑里安装它提供的 GT Redstone Card。该卡暴露 `gtredstone` 组件，程序会调用：
-
-* `setWireless(frequency, signal, isPublic)`：写入 GT 无线红石强度。
-* `getWireless(frequency, isPublic)`：读取 GT 无线红石强度。
-
-因此组控制默认使用：
-
-```lua
-control = {
-  mode = "gt_wireless",
-  frequency = 1234,
-  isPublic = true,
-  on = 15,
-  off = 0
-}
-```
-
-这比 OC 自带无线红石接口更适合 GT 无线控制覆盖版。
-
-机器活跃检测也默认使用同一个 `gtredstone` 组件，并推荐写在组级：
-
-```lua
-active = {
-  mode = "gt_wireless",
-  frequency = 2234,
-  isPublic = true,
-  threshold = 0
-}
-```
-
-`threshold = 0` 表示无线红石强度大于 0 就视为机器组正在工序中。`gtredstone` 组件通常是唯一的，所以配置里不需要写 `address`。如果某台机器确实要单独判断，可以在该机器下写 `active = {...}` 覆盖组级配置。
-
-## 样板推导
-
-在 `group.pattern` 中指定 ME 接口地址前缀和样板槽位。
-
-* 程序读取样板第一个输出，作为 AE 产物流体匹配目标。
-* 程序读取样板最后一个输入；如果数量为 `64`，则视为放射仓材料。
-* 如果最后一个输入不是 `64`，该配方视为不需要放射仓材料，最后一个输入也会参与普通原料门控。
-* 样板中其他输入会作为原料门控。AE 中同名物品或同名流体数量不足时，不启动机器组，也不向放射仓投料。
-
-当前仓库里的 AE 样板转换器只能读到“显示名”和数量，所以匹配依赖显示名。首次部署时请观察程序 `stat` 输出中的 `product` 和 `radio` 是否与 AE 网络显示名一致。
-
-## 阈值逻辑
-
-* `upper`：AE 中产物流体达到或超过该值时关闭组控制信号。
-* `lower`：AE 中产物流体达到或低于该值时尝试开启组控制信号。
-* 任一值为 `nil` 时，对应方向的自动切换禁用。
-* 如果达到开机条件但样板普通输入不足，程序会保持停机并按 `intervals.product` 周期重新检查。
-
-配置里的时间单位都是秒，不是 tick。包括 `intervals.*`、`work.startGrace`、`work.retryInterval` 和 `hatch.refeedInterval`。
-
-## 放射仓逻辑
-
-* 组已开机、样板普通输入充足、组处于启动宽限或活跃状态时，程序会调用 IO Hub 的 `requestItems(database, entry, amount)` 从 AE 网络请求放射材料，再用 `dropIntoSlot(side, hatchSlot, amount)` 推入放射仓。
-* 组级活跃信号消失且超过 `work.startGrace` 后，程序会尝试 `suckFromSlot` 把放射仓槽位中的物品吸回 IO Hub，并用 `sendItems` 送回 AE。
-* 如果原料恢复但组仍未活跃，程序会按 `work.retryInterval` 周期重新短暂投放放射材料，给机器重新进入工序的机会。
-* 如果多个机器共享同一个放射仓，只要共享者中仍有机器活跃或处于启动宽限，程序不会回收该放射仓材料。
-* IO Hub API 不能直接读取放射仓内已有目标物品数量，所以程序使用 `hatch.refeedInterval` 做周期补料。该值应小于等于放射材料单份可持续时间。
-* Database Upgrade 可以放在 OpenComputers Adapter 的升级槽中，并把 Adapter 接到同一个 OC 网络。IO Hub 的源码会通过 `node().network().node(address)` 找这个 database 组件。
-
-## 配置映射
-
-最省配置的方式是：
-
-* 在 `group.hatches` 写入与 `group.machines` 数量相同的放射仓 ID，程序会按顺序一一对应。
-* 如果机器需要多个放射仓，在单台机器里写 `hatches = {"radio_a", "radio_b"}`。
-* 如果多台机器共用同一个放射仓，让这些机器引用同一个 hatch ID，或把 `group.hatches` 写成单个共享列表并关闭按索引映射。
-
-## 常用命令
+## 运行方式
 
 ```sh
-components
-components -l
-lua /path/to/culture_vat.lua /path/to/culture_vat_config.lua
+lua culture_vat.lua /etc/culture_vat_config.lua
 ```
 
-配置中可以使用地址前缀，不必填写完整地址，只要该前缀在对应组件类型中唯一即可。
+如果不传配置路径，程序会依次尝试读取：
+
+- `/etc/culture_vat_config.lua`
+- `culture_vat_config.lua`
+- `./culture_vat_config.lua`
+
+配置中的时间单位都是秒，不是 tick。
+
+## 需要的组件
+
+- 一个 OC 电脑或服务器。
+- 一个可访问 AE 网络的 `me_controller` 或 `me_interface` 组件，用于读取物品和流体库存。
+- 一个放置编码处理样板的 ME 接口，程序通过 `getInterfacePattern` 读取样板。
+- 一个 OC `database` 组件，用于临时保存样板中的放射仓材料描述。
+- Programmable Hatches 的 `gtredstone` 组件，用于读写 GT 无线红石频率。
+- 每个机器组一个无线控制覆盖版频率，用于开关这一组培养缸。
+- 每个机器组一个设备活跃探测无线覆盖版频率，用于判断这一组机器是否真的处于工序中。
+- 每个放射仓旁的 IO Hub。当前脚本通过 IO Hub 从 AE 请求物品，再把物品推入相邻放射仓。
+
+组件地址请优先用 OpenOS 的 `components -l` 查看。分析器看到的地址可能是方块或连接节点地址，不一定是 OC 组件地址。
+
+## 样板规则
+
+程序只支持样板模式：
+
+- `group.pattern` 指向 ME 接口中的编码处理样板。
+- 样板第一个输出默认作为产物流体，用于 AE 流体库存阈值判断。
+- 样板最后一个输入如果数量为 `64`，视为放射仓材料。
+- 样板最后一个输入如果数量不是 `64`，则不启用放射仓材料逻辑，并把它当作普通输入。
+- 除放射仓材料外，其他样板输入都会作为原料门控条件。
+
+流体匹配会对 `drop of ...`、`drops of ...`、`fluid drop of ...` 等显示名前缀做归一化；如果仍然提示缺流体，通常需要检查 AE 组件实际返回的流体显示名。
+
+## 机器组与放射仓
+
+当前推荐配置是组级绑定，不再维护“机器 -> hatch”的一一映射：
+
+```lua
+groups = {
+  {
+    name = "vat_group_1",
+    hatches = {"radio_a", "radio_b"},
+    machines = {
+      {name = "vat_1"},
+      {name = "vat_2"}
+    }
+  }
+}
+```
+
+含义是：`radio_a` 和 `radio_b` 共同服务 `vat_group_1` 整组机器。多台机器共用一个放射仓时，`hatches` 里只写这个 hatch 一次即可。
+
+`machines` 仍然需要保留，主要用于：
+
+- 计算 `inputBatches = "machines"` 时需要多少批原料。
+- 状态日志里显示机器数量。
+- 如果以后某台机器需要单独活跃信号，可以在该 machine 下配置 `active`。
+
+`machine.name` 只用于日志和状态显示，不参与放射仓映射。
+
+## 阈值与启停
+
+每组通过 `thresholds` 控制启停：
+
+- `upper`：AE 中产物流体数量达到或超过该值时关闭控制信号。
+- `lower`：AE 中产物流体数量达到或低于该值时开启控制信号。
+- `upper = nil` 表示不自动停机。
+- `lower = nil` 表示不自动开机。
+
+如果上下限都配置，`upper` 应大于等于 `lower`，形成滞回区间，避免频繁开关。
+
+## 原料门控与空转保护
+
+启动前，程序会检查 AE 中是否有足够的样板普通输入。默认 `inputBatches = "machines"`，即按组内机器数量放大需求。
+
+运行中如果原料不足：
+
+- `forceOffOnUnsafe = true`：关闭组控制信号。
+- `forceOffOnUnsafe = false`：不关闭组控制信号，只停止继续向放射仓投料。
+
+原料恢复后，程序会按 `machine` 检测间隔和 `retryInterval` 继续尝试投放放射仓材料，使机器重新进入工序。
+
+## 放射仓投料行为
+
+脚本不会尝试从 Radio Hatch 抽取物品，因为实际测试中放射仓通常只能导入，不能导出。
+
+每次投料前，程序会通过 IO Hub 检查目标槽：
+
+- 目标槽为空：从 AE 请求 1 个放射仓材料并推入。
+- 目标槽已有正确材料且数量不超过 `targetCount`：不投料。
+- 目标槽已有正确材料但数量超过 `targetCount`：输出 warning，不抽取，等待自然消耗。
+- 目标槽是其他物品：输出 error，不投料，需要手动处理或等待结构自行消耗。
+
+常用 hatch 配置：
+
+```lua
+hatches = {
+  radio_a = {
+    ioHub = "05abc",   -- IO Hub 组件地址前缀，来自 components -l
+    side = sides.east, -- 从 IO Hub 看向放射仓的方向
+    hatchSlot = 1
+  }
+}
+```
+
+## 常见问题
+
+`no component found for type=iohub`：
+使用 `components -l` 中显示的 `iohub` 组件地址前缀，不要使用分析器显示的方块地址。
+
+`cannot request ... from AE via IO Hub`：
+检查 IO Hub 是否连入 AE 网络、AE 是否有该物品、样板最后一个 64 输入是否是正确材料、IO Hub 缓冲槽是否可用。
+
+`cannot drop ... into side=... slot=...`：
+检查 IO Hub 是否贴着正确的放射仓、`side` 是否是从 IO Hub 看向放射仓的方向、`hatchSlot` 是否正确。
+
+`input missing: drop of ...`：
+检查 AE 网络是否真的能被 OC 组件读取到该流体。脚本会做流体显示名归一化，但不同环境返回名仍可能不同。
+
+`contains a different item`：
+放射仓目标槽里不是样板推导出的放射材料。脚本会跳过投料，不会抽取。
+
+`contains N radio items, target=1`：
+目标槽里已有过量正确材料。脚本只报警并停止追加，等待自然消耗。

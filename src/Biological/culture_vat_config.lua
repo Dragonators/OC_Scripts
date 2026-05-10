@@ -81,18 +81,17 @@ return {
     },
 
     hatch = {
-      -- IO Hub API 不提供目标放射仓库存计数，因此这里按周期进行单次投料脉冲。
-      -- 该值应小于等于放射材料单份可持续时间；过小会增加 IO Hub 调用频率。
+      -- 程序会在投料前读取放射仓目标槽，空了才投料。
+      -- 如果数量超过 targetCount 会报警但不会抽取；Radio Hatch 通常不允许导出。
       refeedInterval = 60,
+      targetCount = 1,  -- 放射仓内期望保持的目标材料数量
       amount = 1,       -- 每次从 AE 请求并推入放射仓的数量
       bufferSlot = 1,   -- IO Hub 内部物品槽；程序会临时占用并在必要时送回 AE
-      hatchSlot = 1,    -- 放射仓目标槽
-      removeOnStop = true,
-      removeAmount = 64 -- 机器停止/断料时尝试从放射仓吸回的最大数量
+      hatchSlot = 1     -- 放射仓目标槽
     },
 
     work = {
-      startGrace = 30,    -- 发出开机信号或重试投料后，允许机器在这段时间内变为活跃
+      startGrace = 15,    -- 发出开机信号或重试投料后，允许机器在这段时间内变为活跃
       retryInterval = 60  -- 机器未活跃时，每隔多久重新短暂投放一次放射材料尝试启动
     }
   },
@@ -145,12 +144,13 @@ return {
         inverted = false
       },
 
-      -- 如果一组有 N 台机器并且 group.hatches 也写了 N 个，默认按顺序一一对应。
-      -- 如果多个机器共用同一个放射仓，可以让多个机器写同一个 hatch，或把 group.hatches 写成单个共享项。
+      -- 组级放射仓列表：这些放射仓共同服务这一整个机器组，不再按机器一一映射。
+      -- 多台机器共用同一个放射仓时只写一次；一组需要多个放射仓时就在这里写多个。
       hatches = {"radio_a", "radio_b"},
 
       machines = {
         {
+          -- name 只用于日志和状态显示；不参与放射仓映射。
           name = "vat_1"
         },
         {
