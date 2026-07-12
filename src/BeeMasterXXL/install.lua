@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "beemasterxxl-fixed-v2"
+local releaseTag = "beemasterxxl-fixed-v3"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/BeeMasterXXL/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -277,7 +277,6 @@ local function validateStagedFiles()
                 error(relativePath .. " 语法错误：" .. tostring(loadError))
             end
         end
-        collectgarbage()
     end
 end
 
