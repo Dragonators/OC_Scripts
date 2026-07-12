@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "beemasterxxl-fixed-v1"
+local releaseTag = "beemasterxxl-fixed-v2"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/BeeMasterXXL/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -70,19 +70,28 @@ local function removeTree(path)
 end
 
 local function closeInput(file, path)
-    local ok, reason = file:close()
-    if ok == nil then
+    -- OpenOS filesystem.close() returns no value on success. Only a thrown
+    -- component error indicates failure.
+    local ok, reason = pcall(function()
+        file:close()
+    end)
+    if not ok then
         error("关闭 " .. path .. " 失败：" .. tostring(reason))
     end
 end
 
 local function finishOutput(file, path)
     local flushed, flushError = file:flush()
-    local closed, closeError = file:close()
     if not flushed then
+        pcall(function()
+            file:close()
+        end)
         error("刷新 " .. path .. " 失败：" .. tostring(flushError))
     end
-    if closed == nil then
+    local closed, closeError = pcall(function()
+        file:close()
+    end)
+    if not closed then
         error("关闭 " .. path .. " 失败：" .. tostring(closeError))
     end
 end

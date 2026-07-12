@@ -7,7 +7,7 @@
 机器人安装 Internet Card 后，在 OpenOS 中执行：
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v1/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v2/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
 lua /tmp/beemaster-install.lua /home
 ```
 
