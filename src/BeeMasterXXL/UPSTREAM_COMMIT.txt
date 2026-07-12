@@ -1,0 +1,12 @@
+BeeMasterXXL upstream repository: https://github.com/hxync/BeeMasterXXL
+Upstream branch: main
+Upstream commit: f19f3dd2ce4ea65204f5bb1545d0fff89d2093c1
+
+This offline package adds a configurable fixed/moving World Accelerator mode,
+strict parent-drone species/effect filtering, and retry-path parent validation.
+
+Lua 5.2/LuaJ compatibility file:
+  lib/inflate-bit32.lua
+  source: https://github.com/williamboman/mason.nvim
+  source commit: 2a6940af80375532e5e9e7c1f2fc6319a1b7a69d
+  source path: lua/mason-vendor/zzlib/inflate-bit32.lua
