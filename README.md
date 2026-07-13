@@ -9,7 +9,7 @@ The complete patched BeeMasterXXL package and its OpenOS network installer are i
 Run on the robot with an Internet Card:
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v3/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v4/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
 lua /tmp/beemaster-install.lua /home
 ```
 
