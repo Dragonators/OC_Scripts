@@ -6,6 +6,7 @@ local serialization = require("serialization")
 
 local bot = require("bot")
 local analyzeGenes = require("analyzeGenes")
+local nativeBeeGenes = require("nativeBeeGenes")
 local doUntil = require("doUntil")
 
 local database = component.database
@@ -47,8 +48,10 @@ loadData()
 
 function M.getSpeedAndEffect(species)
     database.set(1, "Forestry:beeDroneGE", 0, '{IsAnalyzed:1b,Genome:{Chromosomes:[0:{Slot:0b,UID0:"'..species..'",UID1:"'..species..'"}]}}')
-    local effect = (database.get(1)--[[@as any]]).individual.inactive.effect:gsub("^forestry%.allele%.effect%.(%l)(%w*)", function(_1, _2) return "forestry.effect" .. _1:upper() .. _2 end)--forestry效果基因nbt与oc不一致，要加个替换
-    local speed = math.floor((database.get(1) --[[@as any]]).individual.inactive.speed / 0.23)
+    local individual = (database.get(1)--[[@as any]]).individual
+    local effect = individual.inactive.effect:gsub("^forestry%.allele%.effect%.(%l)(%w*)", function(_1, _2) return "forestry.effect" .. _1:upper() .. _2 end)--forestry效果基因nbt与oc不一致，要加个替换
+    local speed = math.floor(individual.inactive.speed / 0.23)
+    effect, speed = nativeBeeGenes.resolve(species, effect, speed)
     database.set(1, "Forestry:beeDroneGE", 0, '{IsAnalyzed:1b,Genome:{Chromosomes:[0:{Slot:0b,UID0:"'..species..'",UID1:"'..species..'"},12:{Slot:13b,UID0:"'..effect..'",UID1:"forestry.effectNone"}]}}')
     effect = (database.get(1)--[[@as any]]).individual.inactive.effect:gsub("^forestry%.allele%.effect%.(%l)(%w*)", function(_1, _2) return "forestry.effect" .. _1:upper() .. _2 end)
     return effect, speed >= (data.speedLevel or 0) and speed or data.speedLevel

@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "beemasterxxl-fixed-v4"
+local releaseTag = "beemasterxxl-fixed-v5"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/BeeMasterXXL/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -28,6 +28,7 @@ local files = {
     "install.lua",
     "installer.lua",
     "mutations.lua",
+    "nativeBeeGenes.lua",
     "princessTracker.lua",
     "strategy.lua",
     "tools.lua",
