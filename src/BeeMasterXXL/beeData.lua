@@ -47,12 +47,18 @@ end
 loadData()
 
 function M.getSpeedAndEffect(species)
+    local native = nativeBeeGenes.get(species)
+    if native then
+        local speed = native.speed
+        return native.effect, speed >= (data.speedLevel or 0) and speed or data.speedLevel
+    end
+
     database.set(1, "Forestry:beeDroneGE", 0, '{IsAnalyzed:1b,Genome:{Chromosomes:[0:{Slot:0b,UID0:"'..species..'",UID1:"'..species..'"}]}}')
     local individual = (database.get(1)--[[@as any]]).individual
     local effect = individual.inactive.effect:gsub("^forestry%.allele%.effect%.(%l)(%w*)", function(_1, _2) return "forestry.effect" .. _1:upper() .. _2 end)--forestry效果基因nbt与oc不一致，要加个替换
     local speed = math.floor(individual.inactive.speed / 0.23)
-    effect, speed = nativeBeeGenes.resolve(species, effect, speed)
-    database.set(1, "Forestry:beeDroneGE", 0, '{IsAnalyzed:1b,Genome:{Chromosomes:[0:{Slot:0b,UID0:"'..species..'",UID1:"'..species..'"},12:{Slot:13b,UID0:"'..effect..'",UID1:"forestry.effectNone"}]}}')
+    -- 使用相同的两个等位基因，避免显隐性重排后读取到 effectNone。
+    database.set(1, "Forestry:beeDroneGE", 0, '{IsAnalyzed:1b,Genome:{Chromosomes:[0:{Slot:0b,UID0:"'..species..'",UID1:"'..species..'"},12:{Slot:13b,UID0:"'..effect..'",UID1:"'..effect..'"}]}}')
     effect = (database.get(1)--[[@as any]]).individual.inactive.effect:gsub("^forestry%.allele%.effect%.(%l)(%w*)", function(_1, _2) return "forestry.effect" .. _1:upper() .. _2 end)
     return effect, speed >= (data.speedLevel or 0) and speed or data.speedLevel
 end

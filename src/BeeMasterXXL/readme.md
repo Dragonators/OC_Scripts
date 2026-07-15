@@ -7,7 +7,7 @@
 机器人安装 Internet Card 后，在 OpenOS 中执行：
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v6/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v7/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
 lua /tmp/beemaster-install.lua /home
 ```
 
@@ -66,6 +66,8 @@ bee
 - 仅设置品种染色体的数据库伪造蜂会使用 Forestry 根模板，不能反映该品种的原生速度和效果。
 - 根据 GTNH `ForestryMC 4.10.17` 的 `BeeDefinition` 与 `BeeBranchDefinition` 收录全部 44 种 Forestry 核心蜂的原生速度和效果。
 - 例如 `forestry.speciesEnded` 现在正确解析为 `forestry.effectMisanthrope`，不会再被误判成 `forestry.effectNone`。
+- Forestry 核心蜂命中原生表后直接返回，不再把效果写回伪造蜂并受显隐性重排影响。
+- 其他模组蜂的数据库回退会把效果写入两个等位基因，避免其中一侧固定为 `effectNone`。
 - 其他模组注册的蜂仍沿用原数据库推导方式。
 
 ## 热更新模块缓存修复

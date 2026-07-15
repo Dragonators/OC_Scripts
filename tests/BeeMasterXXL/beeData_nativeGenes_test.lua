@@ -16,7 +16,7 @@ function database.get(_)
         return {
             individual = {
                 inactive = {
-                    effect = "forestry.allele.effect.misanthrope",
+                    effect = "gregtech.effectExpected",
                     speed = 0.46
                 }
             }
@@ -28,7 +28,7 @@ function database.get(_)
     return {
         individual = {
             inactive = {
-                effect = "forestry.allele.effect.none",
+                effect = "gregtech.effectExpected",
                 speed = 1.62
             }
         }
@@ -55,7 +55,13 @@ io.open = originalOpen
 local effect, speed = beeData.getSpeedAndEffect("forestry.speciesEnded")
 assert(effect == "forestry.effectMisanthrope")
 assert(speed == 2)
+assert(setCalls == 0)
+
+effect, speed = beeData.getSpeedAndEffect("gregtech.bee.speciesStardust")
+assert(effect == "gregtech.effectExpected")
+assert(speed == 7)
 assert(setCalls == 2)
-assert(lastNbt:find('UID0:"forestry.effectMisanthrope"', 1, true))
+assert(lastNbt:find('UID0:"gregtech.effectExpected"', 1, true))
+assert(lastNbt:find('UID1:"gregtech.effectExpected"', 1, true))
 
 print("beeData native gene integration test passed")
