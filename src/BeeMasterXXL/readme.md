@@ -7,7 +7,7 @@
 机器人安装 Internet Card 后，在 OpenOS 中执行：
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v5/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v6/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
 lua /tmp/beemaster-install.lua /home
 ```
 
@@ -68,6 +68,11 @@ bee
 - 例如 `forestry.speciesEnded` 现在正确解析为 `forestry.effectMisanthrope`，不会再被误判成 `forestry.effectNone`。
 - 其他模组注册的蜂仍沿用原数据库推导方式。
 
+## 热更新模块缓存修复
+
+- OpenOS 会把 `require()` 的结果保存在全局 `package.loaded` 中；旧脚本报错退出后，直接覆盖硬盘文件仍可能继续使用内存中的旧模块。
+- v6 安装器在完成文件替换后会清除 BeeMasterXXL 的已加载模块，下一次运行 `bee` 会从硬盘重新加载新版本。
+
 ## Lua 架构兼容
 
 上游 `zzlib.lua` 会在 Lua 5.2/LuaJ 下加载 `lib/inflate-bit32.lua`，但 BeeMasterXXL 原仓库漏打包了该文件。本包已从 mason.nvim 的 zzlib vendor 副本补齐它；Lua 5.3 仍使用上游已有的 `lib/inflate-bwo.lua`。
@@ -78,6 +83,7 @@ bee
 - `apiary.lua`
 - `beeData.lua`
 - `nativeBeeGenes.lua`（Forestry 4.10.17 原生速度与效果表）
+- `moduleCache.lua`（安装后清除 OpenOS 旧模块缓存）
 - `princessTracker.lua`（隔离并追踪本轮繁育产生的公主蜂）
 - `strategy.lua`
 - `installer.lua`（离线包防覆盖提示）

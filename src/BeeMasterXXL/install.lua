@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "beemasterxxl-fixed-v5"
+local releaseTag = "beemasterxxl-fixed-v6"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/BeeMasterXXL/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -27,6 +27,7 @@ local files = {
     "environment.lua",
     "install.lua",
     "installer.lua",
+    "moduleCache.lua",
     "mutations.lua",
     "nativeBeeGenes.lua",
     "princessTracker.lua",
@@ -440,6 +441,22 @@ local function promoteStagedFiles()
     end
 end
 
+local function invalidateLoadedModules()
+    local helperPath = filesystem.concat(targetRoot, "moduleCache.lua")
+    local chunk, loadError = loadfile(helperPath, "t", _G)
+    if not chunk then
+        error("无法加载模块缓存清理器：" .. tostring(loadError))
+    end
+    local ok, helper = pcall(chunk)
+    if not ok then
+        error("模块缓存清理器执行失败：" .. tostring(helper))
+    end
+    if type(helper) ~= "table" or type(helper.invalidate) ~= "function" then
+        error("moduleCache.lua 没有返回有效清理器")
+    end
+    return helper.invalidate(files, package.loaded)
+end
+
 local function main()
     ensureDirectory(targetRoot)
     ensureDirectory(filesystem.concat(targetRoot, "lib"))
@@ -473,9 +490,13 @@ local function main()
     validateStagedFiles()
     local humanBackup = createHumanConfigBackup(configPath)
     promoteStagedFiles()
+    local invalidatedModules = invalidateLoadedModules()
 
     print("")
     print("BeeMasterXXL修改版安装完成。")
+    if invalidatedModules > 0 then
+        print("已清除 " .. invalidatedModules .. " 个旧版Lua模块缓存。")
+    end
     if humanBackup then
         print("原配置备份：" .. humanBackup)
     end
