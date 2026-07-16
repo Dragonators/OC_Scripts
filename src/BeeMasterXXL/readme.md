@@ -7,7 +7,7 @@
 机器人安装 Internet Card 后，在 OpenOS 中执行：
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v7/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/beemasterxxl-fixed-v8/src/BeeMasterXXL/install.lua /tmp/beemaster-install.lua
 lua /tmp/beemaster-install.lua /home
 ```
 
@@ -75,6 +75,13 @@ bee
 - OpenOS 会把 `require()` 的结果保存在全局 `package.loaded` 中；旧脚本报错退出后，直接覆盖硬盘文件仍可能继续使用内存中的旧模块。
 - v6 安装器在完成文件替换后会清除 BeeMasterXXL 的已加载模块，下一次运行 `bee` 会从硬盘重新加载新版本。
 
+## 突变槽位同步修复
+
+- AE 升级发送物品后现在会等待机器人 `inventory_changed` 事件，避免脚本继续读取发送前的库存镜像。
+- 突变、提纯和最终配对前会直接读取机器人实际槽位，并在亲本雄蜂槽位失效时按精确 NBT 标签重新获取。
+- 只在亲本雄蜂堆叠数量大于 1 时向 AE 送回多余数量，确保最终配对至少保留一只。
+- 若公主蜂或指定亲本确实不存在，会报告具体槽位和缺失的亲本，不再以 `attempt to index a nil value` 中止。
+
 ## Lua 架构兼容
 
 上游 `zzlib.lua` 会在 Lua 5.2/LuaJ 下加载 `lib/inflate-bit32.lua`，但 BeeMasterXXL 原仓库漏打包了该文件。本包已从 mason.nvim 的 zzlib vendor 副本补齐它；Lua 5.3 仍使用上游已有的 `lib/inflate-bwo.lua`。
@@ -84,6 +91,7 @@ bee
 - `config.lua`
 - `apiary.lua`
 - `beeData.lua`
+- `bot.lua`（AE 发送后的库存同步与实际槽位刷新）
 - `nativeBeeGenes.lua`（Forestry 4.10.17 原生速度与效果表）
 - `moduleCache.lua`（安装后清除 OpenOS 旧模块缓存）
 - `princessTracker.lua`（隔离并追踪本轮繁育产生的公主蜂）

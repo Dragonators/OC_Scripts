@@ -15,13 +15,36 @@ local princessTracker = require("princessTracker")
 
 local chromosomeList = {"species", "speed", "lifespan", "fertility", "flowering", "flowerProvider", "territory", "effect", "temperatureTolerance", "humidityTolerance", "nocturnal", "tolerantFlyer", "caveDwelling"}
 
+local function refreshBeeSlot(slot, expectedType)
+    if type(slot) ~= "number" then
+        return nil
+    end
+    local bee
+    if bot.refreshInventorySlot then
+        bee = bot.refreshInventorySlot(slot)
+    else
+        bee = bot.inventory[slot]
+    end
+    if not bee or bee.type ~= expectedType then
+        return nil
+    end
+    return bee
+end
+
 function M.mutate(princessSlot, droneSlot, targetSpecies, mutation)--单步突变
     --参与配对的杂交雄蜂被归为三类：亲代1纯合基因雄蜂（11型）、亲代2纯合基因雄蜂（22型）、双亲杂合基因雄蜂（12型）
     --突变过程存在种族基因存在丢失的可能，此时将返回nil（附带退回的备选雄蜂槽位），待上级函数重新获取可用母本后继续。
     --由于退出时不丢弃已有雄蜂，且已有雄蜂均打上了该品种基因突变标签，故可在下次突变调用中继承已有的雄蜂基因池。
     --1.校验输入
-    if bot.inventory[princessSlot].type ~= "beePrincess" or bot.inventory[droneSlot].type ~= "beeDrone" or not targetSpecies or not mutation then
-        error(string.format("错误的调用strategy.mutate(%d, %d, %s)",princessSlot, droneSlot, mutation.name))
+    local princess = refreshBeeSlot(princessSlot, "beePrincess")
+    local drone = refreshBeeSlot(droneSlot, "beeDrone")
+    if not princess or not drone or not targetSpecies or not mutation then
+        error(string.format(
+            "错误的调用strategy.mutate：公主蜂槽位=%s（%s），雄蜂槽位=%s（%s），目标=%s",
+            tostring(princessSlot), princess and "有效" or "为空或不是公主蜂",
+            tostring(droneSlot), drone and "有效" or "为空或不是雄蜂",
+            tostring(targetSpecies)
+        ))
     end
     for _, chromosome in pairs(chromosomeList) do
         local p1, p2 = bot.inventory[princessSlot][chromosome][1], bot.inventory[princessSlot][chromosome][2]
@@ -852,17 +875,18 @@ function M.newSpecies(species, mutation)--突变新品种并优化基因
     ::GET_PARENT_BEES::
     assistantDroneSlot = M.getAssistantDrones()--[[@as number]]
     princessSlot = bot.checkItem({name="Forestry:beePrincessGE",tag=beeData.getPrincessTag(true)}, 1)
-    if not princessSlot then
+    local princess = refreshBeeSlot(princessSlot, "beePrincess")
+    if not princess then
         error(string.format("突变%s：无法获取公主蜂", mutation.name))
     end
     local isPrincessParent
-    if bot.inventory[princessSlot].species[1] == mutation.parents[1] and bot.inventory[princessSlot].species[2] == mutation.parents[1] then
+    if princess.species[1] == mutation.parents[1] and princess.species[2] == mutation.parents[1] then
         isPrincessParent = 1
-    elseif bot.inventory[princessSlot].species[1] == mutation.parents[2] and bot.inventory[princessSlot].species[2] == mutation.parents[2] then
+    elseif princess.species[1] == mutation.parents[2] and princess.species[2] == mutation.parents[2] then
         isPrincessParent = 2
     end
     allele1Tag, allele2Tag = getParentTags()
-    local operations, exchanged = getOperations(isPrincessParent, isTemplatedGenes(bot.inventory[princessSlot].tag), isTemplatedGenes(allele1Tag), isTemplatedGenes(allele2Tag))
+    local operations, exchanged = getOperations(isPrincessParent, isTemplatedGenes(princess.tag), isTemplatedGenes(allele1Tag), isTemplatedGenes(allele2Tag))
     allele1Slot = bot.checkItem({name="Forestry:beeDroneGE",tag=allele1Tag}, 16)
     allele2Slot = bot.checkItem({name="Forestry:beeDroneGE",tag=allele2Tag}, 16)
     if not allele1Slot and not allele2Slot then
@@ -870,12 +894,24 @@ function M.newSpecies(species, mutation)--突变新品种并优化基因
     end
     for _, operation in ipairs(operations) do
         if operation == "purify(1)" then
+            if not refreshBeeSlot(allele1Slot, "beeDrone") then
+                allele1Slot = bot.checkItem({name="Forestry:beeDroneGE",tag=allele1Tag}, 16)
+            end
+            if not refreshBeeSlot(allele1Slot, "beeDrone") then
+                error(string.format("突变%s：缺少亲本雄蜂1（%s）", mutation.name, mutation.parents[1]))
+            end
             allele1Slot, princessSlot = M.purify(princessSlot, allele1Slot, beeData.getTargetGenes(mutation.parents[1]), assistantDroneSlot, ":allele1")
             if not allele1Slot then
                 beeData.updateUsingPrincess(princessSlot)
                 error("突变"..mutation.name.."亲本雄蜂1基因丢失")
             end
         elseif operation == "purify(2)" then
+            if not refreshBeeSlot(allele2Slot, "beeDrone") then
+                allele2Slot = bot.checkItem({name="Forestry:beeDroneGE",tag=allele2Tag}, 16)
+            end
+            if not refreshBeeSlot(allele2Slot, "beeDrone") then
+                error(string.format("突变%s：缺少亲本雄蜂2（%s）", mutation.name, mutation.parents[2]))
+            end
             allele2Slot, princessSlot = M.purify(princessSlot, allele2Slot, beeData.getTargetGenes(mutation.parents[2]), assistantDroneSlot, ":allele2")
             if not allele2Slot then
                 beeData.updateUsingPrincess(princessSlot)
@@ -883,40 +919,61 @@ function M.newSpecies(species, mutation)--突变新品种并优化基因
             end
         end
     end
-    if exchanged then
-        if mutation.parents[1] == mutation.parents[2] then
+
+    -- Choose the exact parent needed for the final mutation before returning
+    -- unused bees to AE. The old code could continue with a nil/stale slot here.
+    if mutation.parents[1] == mutation.parents[2] then
+        if exchanged then
             allele1Slot = allele2Slot
-        elseif allele2Slot ~= assistantDroneSlot then
-            robot.select(allele2Slot)
-            upgrade_me.sendItems()
-        end
-        allele2Slot = nil
-    else
-        if mutation.parents[1] == mutation.parents[2] then
+        else
             allele2Slot = allele1Slot
-        elseif allele1Slot ~= assistantDroneSlot then
-            robot.select(allele1Slot)
-            upgrade_me.sendItems()
         end
-        allele1Slot = nil
     end
-    if bot.inventory[assistantDroneSlot] and assistantDroneSlot ~= (exchanged and allele1Slot or allele2Slot) then
+    local mutationDroneSlot = exchanged and allele1Slot or allele2Slot
+    local unusedDroneSlot = exchanged and allele2Slot or allele1Slot
+    local expectedDroneTag = exchanged and allele1Tag or allele2Tag
+    local mutationDrone = refreshBeeSlot(mutationDroneSlot, "beeDrone")
+    if not mutationDrone then
+        mutationDroneSlot = bot.checkItem({name="Forestry:beeDroneGE",tag=expectedDroneTag}, 1)
+        mutationDrone = refreshBeeSlot(mutationDroneSlot, "beeDrone")
+    end
+    if not mutationDrone then
+        error(string.format(
+            "突变%s：无法取得最终配对所需的亲本雄蜂（%s）",
+            mutation.name, exchanged and mutation.parents[1] or mutation.parents[2]
+        ))
+    end
+    local mutationDroneTag = mutationDrone.tag
+    princess = refreshBeeSlot(princessSlot, "beePrincess")
+    if not princess then
+        error(string.format("突变%s：纯化后公主蜂槽位丢失", mutation.name))
+    end
+
+    if unusedDroneSlot and unusedDroneSlot ~= mutationDroneSlot and unusedDroneSlot ~= assistantDroneSlot and refreshBeeSlot(unusedDroneSlot, "beeDrone") then
+        robot.select(unusedDroneSlot)
+        upgrade_me.sendItems()
+    end
+    if refreshBeeSlot(assistantDroneSlot, "beeDrone") and assistantDroneSlot ~= mutationDroneSlot then
         robot.select(assistantDroneSlot)
         upgrade_me.sendItems()
         assistantDroneSlot = nil
     end
     --执行突变
-    if exchanged then
-        robot.select(allele1Slot--[[@as number]])
-        upgrade_me.sendItems(robot.count(allele1Slot--[[@as number]])-1)
-        mutatedBeeList, princessSlot = M.mutate(princessSlot, allele1Slot, species, mutation)
-        allele1Slot = nil
-    else
-        robot.select(allele2Slot--[[@as number]])
-        upgrade_me.sendItems(robot.count(allele2Slot--[[@as number]])-1)
-        mutatedBeeList, princessSlot = M.mutate(princessSlot, allele2Slot, species, mutation)
-        allele2Slot = nil
+    robot.select(mutationDroneSlot)
+    local excess = robot.count(mutationDroneSlot) - 1
+    if excess > 0 then
+        upgrade_me.sendItems(excess)
     end
+    mutationDrone = refreshBeeSlot(mutationDroneSlot, "beeDrone")
+    if not mutationDrone then
+        mutationDroneSlot = bot.checkItem({name="Forestry:beeDroneGE",tag=mutationDroneTag}, 1)
+        mutationDrone = refreshBeeSlot(mutationDroneSlot, "beeDrone")
+    end
+    if not mutationDrone then
+        error(string.format("突变%s：保留最后一只亲本雄蜂失败", mutation.name))
+    end
+    mutatedBeeList, princessSlot = M.mutate(princessSlot, mutationDroneSlot, species, mutation)
+    allele1Slot, allele2Slot = nil, nil
     if not mutatedBeeList then
         beeData.updateUsingPrincess(princessSlot)
         goto GET_PARENT_BEES

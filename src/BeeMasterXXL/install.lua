@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "beemasterxxl-fixed-v7"
+local releaseTag = "beemasterxxl-fixed-v8"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/BeeMasterXXL/"
 local targetRoot = shell.resolve((...) or "/home")

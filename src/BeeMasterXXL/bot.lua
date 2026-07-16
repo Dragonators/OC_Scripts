@@ -38,6 +38,16 @@ function M.updateInventory(_, slot)
 end
 event.listen("inventory_changed", M.updateInventory)
 
+-- Do not rely only on the asynchronous inventory_changed event at critical
+-- breeding boundaries. This reads the real robot slot and refreshes the cache.
+function M.refreshInventorySlot(slot)
+    if type(slot) ~= "number" or slot < 1 or slot > inventorySize or slot % 1 ~= 0 then
+        return nil
+    end
+    M.updateInventory(nil, slot)
+    return M.inventory[slot]
+end
+
 --robot库物品栏操作函数重定向
 local t, e = robot.transferTo, inventory_controller.equip
 function M.equip()
@@ -67,7 +77,8 @@ end
 robot.transferTo, inventory_controller.equip = M.transfer, M.equip
 local inventoryChangerList = {
     {robot, "drop"}, {robot, "dropDown"}, {robot, "dropUp"}, {robot, "suck"}, {robot, "suckDown"}, {robot, "suckUp"},
-    {inventory_controller, "dropIntoSlot"}, {inventory_controller, "suckFromSlot"}, {upgrade_me, "requestItems"}
+    {inventory_controller, "dropIntoSlot"}, {inventory_controller, "suckFromSlot"},
+    {upgrade_me, "requestItems"}, {upgrade_me, "sendItems"}
 }
 for _, pack in pairs(inventoryChangerList) do--对于可能改变物品栏的函数，在结束后执行一个sleep(0.01)等待异步操作更新物品栏映射表
     local lib, funcName = pack[1], pack[2]
@@ -75,6 +86,7 @@ for _, pack in pairs(inventoryChangerList) do--对于可能改变物品栏的函
     lib[funcName] = function(...)
         local result = previousFunc(...)
         os.sleep(0.01)
+        M.refreshInventorySlot(robot.select())
         return result
     end
 end
