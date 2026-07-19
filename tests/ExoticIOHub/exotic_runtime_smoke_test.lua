@@ -68,6 +68,17 @@ package.preload.event = function()
     pull = function()
       now = now + 0.5
       scenario.events = scenario.events + 1
+      if scenario.refillFluids and not scenario.didRefill and scenario.sentFluids > 0 then
+        local occupied = false
+        for _, fluid in pairs(scenario.fluids) do
+          if fluid then occupied = true; break end
+        end
+        if not occupied then
+          scenario.fluids = scenario.refillFluids
+          scenario.items = scenario.refillItems or scenario.items
+          scenario.didRefill = true
+        end
+      end
       if scenario.dualHasFluid and not scenario.keepDualDirty then
         scenario.dualHasFluid = false
         scenario.machineTicks = scenario.machineDuration or 4
@@ -109,6 +120,7 @@ function iohub.sendItems(count)
   if not item or item.size ~= count then return 0 end
   scenario.items[iohub.selectedItem] = nil
   scenario.sentItems = scenario.sentItems + count
+  scenario.sendTimes[#scenario.sendTimes + 1] = now
   return count, "items"
 end
 function iohub.selectTank(tank) iohub.selectedTank = tank; return tank end
@@ -118,6 +130,7 @@ function iohub.sendFluids(amount)
   if not fluid or fluid.amount ~= amount then return 0 end
   scenario.fluids[iohub.selectedTank] = nil
   scenario.sentFluids = scenario.sentFluids + amount
+  scenario.sendTimes[#scenario.sendTimes + 1] = now
   return amount, "L"
 end
 function iohub.getFluidsInNetwork()
@@ -173,12 +186,15 @@ end
 function dual.submitTask()
   local states = {}
   scenario.submitted = {}
+  local anyInjected = false
   for index, task in ipairs(dual.queued) do
-    local state = scenario.partialSubmit and index == #dual.queued and "partially executed" or "executed"
+    local state = scenario.submitState or
+      (scenario.partialSubmit and index == #dual.queued and "partially executed" or "executed")
     states[index] = { id = task.id, state = state }
     scenario.submitted[index] = task
+    if state == "executed" or state == "partially executed" then anyInjected = true end
   end
-  if #dual.queued > 0 then scenario.dualHasFluid = true end
+  if anyInjected then scenario.dualHasFluid = true end
   dual.queued = {}
   return states
 end
@@ -291,6 +307,8 @@ local function reset(base)
   scenario.screen = {}
   scenario.screenText = ""
   scenario.resolutions = {}
+  scenario.sendTimes = {}
+  scenario.didRefill = false
 end
 
 local function usedResolution(width, height)
@@ -312,6 +330,28 @@ assert(#scenario.submitted == 7,
   "quark must submit seven fluids; screen=" .. scenario.screenText)
 assert(scenario.sentItems == 0 and scenario.sentFluids == 28, "all quark hints must return to AE")
 assert(usedResolution(80, 25), "quark GUI must render at 80x25")
+
+local refillFluids, refillStock = {}, {}
+for index = 1, 7 do
+  refillFluids[index] = { name = "material" .. index, label = "Material " .. index, amount = 1 }
+  refillStock["plasma.material" .. index] = (index + 1) * 1000
+end
+local initialFluids = {}
+for index = 1, 7 do
+  initialFluids[index] = { name = "material" .. index, label = "Material " .. index, amount = index }
+end
+reset({ items = {}, fluids = initialFluids, refillFluids = refillFluids, stock = refillStock, quitAfter = 45 })
+assert(common.run({ mode = "quark", title = "Quark refill smoke" },
+  "tests/ExoticIOHub/exotic_quark_smoke.cfg"))
+assert(scenario.didRefill and scenario.sentFluids == 35,
+  "samples arriving after the first drain must be drained and accumulated")
+for index, task in ipairs(scenario.submitted) do
+  assert(task.amount == (index + 1) * 1000, "refilled samples must contribute to the final requirement")
+end
+for index = 2, 7 do
+  assert(scenario.sendTimes[index] == scenario.sendTimes[1],
+    "all occupied slots in one scan must be returned before the next event wait")
+end
 
 reset({
   items = { [1] = { name = "miscutils:itemDustHypogen", label = "Hypogen Dust", damage = 0, size = 1 } },
@@ -402,6 +442,10 @@ faultQuark({ stocked = true, partialSubmit = true, quitAfter = 24 })
 assert(screenHas("双输入任务未全部执行") and scenario.refundCount == 1 and not scenario.dualHasFluid,
   "partial submission must refund and latch")
 
+faultQuark({ stocked = true, submitState = "me network disconnected", quitAfter = 24 })
+assert(screenHas("二合一输入枢纽的 AE 网络未连接") and not scenario.dualHasFluid,
+  "OC-visible but AE-disconnected dual hatch must show the exact topology fault")
+
 faultQuark({
   stocked = true, partialSubmit = true, refundWorks = false,
   keepDualDirty = true, quitAfter = 24
@@ -419,4 +463,4 @@ assert(screenHas("机器运行超过 recipeTimeout") and scenario.refundCount ==
 
 for _, path in ipairs(journalPaths) do os.remove(path) end
 
-print("exotic_runtime_smoke_test: two complete cycles and 13 fault scenarios passed")
+print("exotic_runtime_smoke_test: refill accumulation, two complete cycles and 14 fault scenarios passed")

@@ -220,6 +220,13 @@ truthy(api.allTasksExecuted({ { state = "executed" }, { state = "executed" } }, 
 equal(api.allTasksExecuted({ { state = "executed" }, { state = "partially executed" } }, 2), false,
   "partial submit rejected")
 equal(api.allTasksExecuted({ { state = "executed" } }, 2), false, "missing task result rejected")
+local stateOk, stateSummary = api.taskStatesSummary({
+  { id = 10, state = "executed" },
+  { id = 11, state = "me network disconnected" }
+}, 2)
+equal(stateOk, false, "disconnected task rejected")
+truthy(stateSummary:find("#11", 1, true) and stateSummary:find("AE 网络未连接", 1, true),
+  "task failure summary keeps the task id and Chinese reason")
 
 local signatureA = api.snapshotSignature({
   items = { { slot = 2, name = "b", damage = 0, size = 1 }, { slot = 1, name = "a", damage = 0, size = 1 } },

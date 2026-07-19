@@ -39,6 +39,7 @@ local defaults = {
   partialHintTimeout = 30,
   maxCraftAttempts = 6,
   stableSamples = 2,
+  recycleQuietSamples = 6,
   screenWidth = 120,
   screenHeight = 35,
   logLines = 6,
@@ -285,6 +286,49 @@ local function allTasksExecuted(states, expected)
   return true
 end
 
+local taskStateZh = {
+  ["added"] = "已加入但未提交",
+  ["ready to submit"] = "已就绪但未执行",
+  ["data base missing"] = "数据库不可见",
+  ["item invalid"] = "数据库槽位无效",
+  ["item is not fluid container"] = "数据库物品不是有效流体容器",
+  ["cancelled"] = "已取消",
+  ["executed"] = "已执行",
+  ["me storage not sufficient"] = "AE 精确流体库存不足",
+  ["me network disconnected"] = "二合一输入枢纽的 AE 网络未连接",
+  ["partially executed"] = "部分执行"
+}
+
+local function taskStatesSummary(states, expected)
+  if type(states) ~= "table" then return false, "submitTask 未返回任务列表" end
+  local details, executed = {}, #states == expected
+  if #states ~= expected then
+    details[#details + 1] = string.format("返回 %d/%d 项", #states, expected)
+  end
+  for index = 1, math.max(#states, expected) do
+    local task = states[index]
+    if type(task) ~= "table" then
+      executed = false
+      details[#details + 1] = string.format("#%d 无返回", index)
+    else
+      local raw = tostring(task.state or "error")
+      if raw ~= "executed" then executed = false end
+      details[#details + 1] = string.format("#%s %s", tostring(task.id or index), taskStateZh[raw] or raw)
+    end
+  end
+  return executed, table.concat(details, "；")
+end
+
+local function taskFailureAdvice(states)
+  if type(states) ~= "table" then return "" end
+  for _, task in ipairs(states) do
+    if type(task) == "table" and task.state == "me network disconnected" then
+      return "；OC 可见不等于 AE 已连接，请把二合一输入枢纽正面直接贴住 IO Hub"
+    end
+  end
+  return ""
+end
+
 local function dualDatabaseIndex(luaSlot)
   return assert(tonumber(luaSlot), "database slot required") - 1
 end
@@ -298,6 +342,7 @@ M._test = {
   dropletNameZh = dropletNameZh,
   snapshotSignature = snapshotSignature,
   allTasksExecuted = allTasksExecuted,
+  taskStatesSummary = taskStatesSummary,
   dualDatabaseIndex = dualDatabaseIndex
 }
 
@@ -399,6 +444,8 @@ function M.run(profile, configPath)
     stableCount = 0,
     partialSince = nil,
     recycleIndex = 1,
+    recycleQuietCount = 0,
+    recycleTotals = nil,
     ensureIndex = 1,
     craft = nil,
     phaseSince = computer.uptime(),
@@ -438,6 +485,8 @@ function M.run(profile, configPath)
       stage = stage,
       savedAt = computer.uptime(),
       recycleIndex = state.recycleIndex,
+      recycleQuietCount = state.recycleQuietCount,
+      recycleTotals = state.recycleTotals,
       hints = state.hints,
       requirements = state.requirements
     }
@@ -674,35 +723,85 @@ function M.run(profile, configPath)
     return buildMagmatterRequirements(snapshot, devices.database, config.databaseSlots.plasmaProbe)
   end
 
+  local function itemKey(item)
+    return tostring(item.name) .. ":" .. tostring(tonumber(item.damage) or 0)
+  end
+
+  local function fluidKey(fluid)
+    return tostring(fluid.name)
+  end
+
+  local function newRecycleTotals(hints)
+    local totals = { items = {}, fluids = {}, allowedItems = {}, allowedFluids = {} }
+    for _, item in ipairs(hints.items or {}) do totals.allowedItems[itemKey(item)] = true end
+    for _, fluid in ipairs(hints.fluids or {}) do totals.allowedFluids[fluidKey(fluid)] = true end
+    return totals
+  end
+
+  local function addRecycledItem(item, amount)
+    local key = itemKey(item)
+    local total = state.recycleTotals.items[key]
+    if not total then
+      total = {
+        name = item.name, damage = tonumber(item.damage) or 0, size = 0,
+        label = item.label, oreNames = item.oreNames
+      }
+      state.recycleTotals.items[key] = total
+    end
+    total.size = total.size + amount
+  end
+
+  local function addRecycledFluid(fluid, amount)
+    local key = fluidKey(fluid)
+    local total = state.recycleTotals.fluids[key]
+    if not total then
+      total = { name = fluid.name, amount = 0, label = fluid.label }
+      state.recycleTotals.fluids[key] = total
+    end
+    total.amount = total.amount + amount
+  end
+
+  local function recycledSnapshot()
+    local snapshot = { items = {}, fluids = {} }
+    for _, item in pairs(state.recycleTotals.items or {}) do
+      snapshot.items[#snapshot.items + 1] = item
+    end
+    for _, fluid in pairs(state.recycleTotals.fluids or {}) do
+      snapshot.fluids[#snapshot.fluids + 1] = fluid
+    end
+    return snapshot
+  end
+
   local function sendItemToAE(hint)
     local current = valueCall(devices.iohub, "getStackInInternalSlot", hint.slot)
-    if current ~= nil and (current.name ~= hint.name or tonumber(current.damage) ~= tonumber(hint.damage)
-        or tonumber(current.size) ~= tonumber(hint.size)) then
+    if current == nil or tonumber(current.size or 0) <= 0 then return 0 end
+    if current.name ~= hint.name or tonumber(current.damage) ~= tonumber(hint.damage) then
       error("物品槽 " .. hint.slot .. " 已被未知物品替换，拒绝回送")
     end
+    local before = tonumber(current.size) or 0
     valueCall(devices.iohub, "select", hint.slot)
-    local before = numberCall(devices.iohub, "count", hint.slot) or 0
-    if before <= 0 then return end
     local sent = numberCall(devices.iohub, "sendItems", before) or 0
-    local after = numberCall(devices.iohub, "count", hint.slot) or 0
-    if sent ~= before or after ~= 0 then
-      error(string.format("物品槽 %d 回送 AE 不完整: %d/%d，剩余 %d", hint.slot, sent, before, after))
+    if sent ~= before then
+      error(string.format("物品槽 %d 回送 AE 不完整: %d/%d", hint.slot, sent, before))
     end
+    addRecycledItem(current, sent)
+    return sent
   end
 
   local function sendFluidToAE(hint)
     local current = valueCall(devices.iohub, "getFluidInInternalTank", hint.slot)
-    if current ~= nil and (current.name ~= hint.name or tonumber(current.amount) ~= tonumber(hint.amount)) then
+    if current == nil or tonumber(current.amount or 0) <= 0 then return 0 end
+    if current.name ~= hint.name then
       error("流体槽 " .. hint.slot .. " 已被未知流体替换，拒绝回送")
     end
+    local before = tonumber(current.amount) or 0
     valueCall(devices.iohub, "selectTank", hint.slot)
-    local before = numberCall(devices.iohub, "tankLevel", hint.slot) or 0
-    if before <= 0 then return end
     local sent = numberCall(devices.iohub, "sendFluids", before) or 0
-    local after = numberCall(devices.iohub, "tankLevel", hint.slot) or 0
-    if sent ~= before or after ~= 0 then
-      error(string.format("流体槽 %d 回送 AE 不完整: %d/%d，剩余 %d", hint.slot, sent, before, after))
+    if sent ~= before then
+      error(string.format("流体槽 %d 回送 AE 不完整: %d/%d", hint.slot, sent, before))
     end
+    addRecycledFluid(current, sent)
+    return sent
   end
 
   local function isProductFluid(name)
@@ -724,22 +823,41 @@ function M.run(profile, configPath)
   end
 
   local function recycleStep()
-    local combined = {}
-    for _, hint in ipairs(state.hints.items) do combined[#combined + 1] = { kind = "item", hint = hint } end
-    for _, hint in ipairs(state.hints.fluids) do combined[#combined + 1] = { kind = "fluid", hint = hint } end
-    local current = combined[state.recycleIndex]
-    if not current then
-      local remaining = readSnapshot()
-      if not snapshotEmpty(remaining) then error("样板处理后 IO 枢纽仍有残留") end
+    state.recycleTotals = state.recycleTotals or newRecycleTotals(state.hints)
+    local snapshot = readSnapshot()
+    if snapshotEmpty(snapshot) then
+      state.recycleQuietCount = state.recycleQuietCount + 1
+      if state.recycleQuietCount < config.recycleQuietSamples then return end
+
+      local totalSnapshot = recycledSnapshot()
+      local requirements, reason = buildRequirements(totalSnapshot)
+      if not requirements then error("累计回送样板无效: " .. tostring(reason)) end
+      state.hints = totalSnapshot
+      state.requirements = requirements
       writeJournal("recycled")
       state.ensureIndex = 1
-      setPhase("ENSURE_CRAFTED", "全部样板已回送 AE，开始核验库存")
+      setPhase("ENSURE_CRAFTED", "IO 枢纽已整体静默，全部样板已回送 AE")
       return
     end
-    if current.kind == "item" then sendItemToAE(current.hint)
-    else sendFluidToAE(current.hint) end
+
+    state.recycleQuietCount = 0
+    for _, item in ipairs(snapshot.items) do
+      if not state.recycleTotals.allowedItems[itemKey(item)] then
+        error("回送期间出现未知物品: " .. tostring(item.label or item.name))
+      end
+    end
+    for _, fluid in ipairs(snapshot.fluids) do
+      if not state.recycleTotals.allowedFluids[fluidKey(fluid)] then
+        error("回送期间出现未知流体: " .. tostring(fluid.label or fluid.name))
+      end
+    end
+
+    local sentItems, sentFluids = 0, 0
+    for _, item in ipairs(snapshot.items) do sentItems = sentItems + sendItemToAE(item) end
+    for _, fluid in ipairs(snapshot.fluids) do sentFluids = sentFluids + sendFluidToAE(fluid) end
     state.recycleIndex = state.recycleIndex + 1
     writeJournal("recycling")
+    log("info", string.format("整轮回送 IO: 物品 %d，流体 %d L", sentItems, sentFluids))
   end
 
   local function namedCpuBusy()
@@ -906,11 +1024,20 @@ function M.run(profile, configPath)
       error("提交调用失败，已取消队列并退款: " .. submitted.error)
     end
     local states = submitted.ok and submitted.values[1]
-    local allExecuted = allTasksExecuted(states, #state.requirements)
+    local allExecuted, summary = taskStatesSummary(states, #state.requirements)
     if not allExecuted then
+      if type(states) == "table" then
+        for index, task in ipairs(states) do
+          local raw = type(task) == "table" and tostring(task.state or "error") or "无返回"
+          if raw ~= "executed" then
+            log("error", string.format("双输入任务 #%s: %s", tostring(type(task) == "table" and task.id or index),
+              taskStateZh[raw] or raw))
+          end
+        end
+      end
       local refunded = refundDual()
-      if not refunded then error("双输入任务部分执行且退款失败，禁止自动重试") end
-      error("双输入任务未全部执行，已退款")
+      if not refunded then error("双输入任务失败且退款失败: " .. summary .. "；禁止自动重试") end
+      error("双输入任务未全部执行: " .. summary .. taskFailureAdvice(states) .. "；已退款")
     end
 
     writeJournal("dispatched")
@@ -927,6 +1054,8 @@ function M.run(profile, configPath)
     state.stableCount = 0
     state.partialSince = nil
     state.recycleIndex = 1
+    state.recycleQuietCount = 0
+    state.recycleTotals = nil
     state.ensureIndex = 1
     state.craft = nil
     setPhase("WAIT_HINTS", "本轮完成，等待下一组样板")
@@ -935,6 +1064,8 @@ function M.run(profile, configPath)
   local function recoverJournal(record)
     state.hints = record.hints
     state.requirements = record.requirements or {}
+    state.recycleQuietCount = tonumber(record.recycleQuietCount) or 0
+    state.recycleTotals = record.recycleTotals
     local machine = machineData()
     local snapshot = readSnapshot()
     if machine.progress > 0 or machine.active then
@@ -945,11 +1076,13 @@ function M.run(profile, configPath)
     if record.stage == "queueing" or record.stage == "dispatching" then
       local flushed = resultCall(devices.dual, "submitTask")
       local states = flushed.ok and flushed.values[1]
-      if allTasksExecuted(states, #state.requirements) then
+      local allExecuted, summary = taskStatesSummary(states, #state.requirements)
+      if allExecuted then
         writeJournal("dispatched")
         setPhase("WAIT_START", "已恢复并提交崩溃前的完整任务队列")
         return
       end
+      if summary and summary ~= "" then log("warn", "恢复提交结果: " .. summary) end
       if not refundDual() then
         fail("恢复未完成任务队列时退款失败")
         return
@@ -1033,6 +1166,8 @@ function M.run(profile, configPath)
     state.hints = snapshot
     state.requirements = requirements
     state.recycleIndex = 1
+    state.recycleQuietCount = 0
+    state.recycleTotals = nil
     writeJournal("captured")
     setPhase("RECYCLE_HINTS", "样板稳定且签名正确，开始回送 AE")
   end
