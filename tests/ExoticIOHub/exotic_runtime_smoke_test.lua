@@ -40,7 +40,14 @@ end
 package.preload.unicode = function()
   return { wlen = utf8Width, wtrunc = utf8Truncate, sub = string.sub }
 end
-package.preload.computer = function() return { uptime = function() return now end } end
+package.preload.computer = function()
+  return {
+    uptime = function() return now end,
+    getDeviceInfo = function()
+      return { database = { capacity = tostring(scenario.databaseCapacity or 81) } }
+    end
+  }
+end
 package.preload.serialization = function()
   return { serialize = function() return "journal" end, unserialize = function() return nil, "not used" end }
 end
@@ -76,7 +83,6 @@ package.preload.event = function()
 end
 
 local database = { slots = {} }
-function database.size() return 81 end
 function database.set(slot, id, damage, nbt)
   database.slots[slot] = { name = id, damage = damage, nbt = nbt }
   return true
@@ -253,6 +259,8 @@ assert(ioMethods.getStackInInternalSlot == false and ioMethods.getFluidInInterna
   "non-direct OC callbacks must be represented by false, not treated as missing")
 assert(ioMethods.count == true and type(proxies.iohub.getStackInInternalSlot) == "table",
   "OC component callbacks must be exercised as callable proxy tables")
+assert(componentMock.methods("database").size == nil,
+  "database size is an internal Java property, not an OC callback")
 
 local common = require("exotic_iohub_common")
 

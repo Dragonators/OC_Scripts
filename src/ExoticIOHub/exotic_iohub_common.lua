@@ -545,12 +545,16 @@ function M.run(profile, configPath)
     })
     validateMethods(addresses.dual, "OC 二合一输入枢纽",
       { "addTask", "cancelTask", "submitTask", "isEmpty", "refund" })
-    validateMethods(addresses.database, "数据库", { "get", "set", "size" })
+    validateMethods(addresses.database, "数据库", { "get", "set" })
     validateMethods(addresses.machine, "gt_machine", { "getWorkProgress", "getWorkMaxProgress", "isMachineActive" })
 
     local needed = math.max(config.databaseSlots.fluidCellStart + 6, config.databaseSlots.craftDrop,
       config.databaseSlots.plasmaProbe)
-    if tonumber(valueCall(devices.database, "size")) < needed then
+    local deviceInfo = valueCall(computer, "getDeviceInfo")
+    local databaseInfo = type(deviceInfo) == "table" and deviceInfo[addresses.database] or nil
+    local databaseCapacity = databaseInfo and tonumber(databaseInfo.capacity) or nil
+    if not databaseCapacity then error("无法通过 computer.getDeviceInfo() 读取数据库容量") end
+    if databaseCapacity < needed then
       error("数据库至少需要 " .. needed .. " 个槽位")
     end
 

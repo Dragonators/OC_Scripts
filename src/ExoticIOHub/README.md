@@ -124,6 +124,10 @@ for name in pairs(component.methods(dual.address)) do print("dualhatch", name) e
 至少有 9 个槽位，AE 物品与流体存储均有接收空间，两个 AE 设备均在线且专用
 CPU 可见。
 
+数据库的 Java `size()` 是内部接口，并不是 Lua 回调。脚本通过
+`computer.getDeviceInfo()[数据库地址].capacity` 检查实际容量，不会要求数据库
+组件暴露不存在的 `size` 回调。
+
 ## 离线测试
 
 仓库测试使用 Lua 5.2 兼容的 Fengari 运行：
