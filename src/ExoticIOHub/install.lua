@@ -1,4 +1,4 @@
--- Transactional installer for the Forge of Gods Exotic IO Hub automation.
+-- Transactional installer for the Forge of Gods ME-interface/transposer automation.
 -- The payload is pinned to an immutable Git tag.
 
 local component = require("component")
@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "exotic-iohub-v7"
+local releaseTag = "exotic-iohub-v8"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/ExoticIOHub/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -170,7 +170,7 @@ local function backupCurrentFiles()
         end
     end
     local marker = assert(io.open(rollbackMarker, "wb"))
-    marker:write("Exotic IO Hub install in progress\n")
+    marker:write("Exotic transposer install in progress\n")
     finishOutput(marker, rollbackMarker)
 end
 
@@ -252,7 +252,7 @@ local function main()
     package.loaded.exotic_iohub_common = nil
     package.loaded.exotic_zh_cn = nil
     print("")
-    print("诸神之锻炉 IO Hub 自动化安装完成。")
+    print("诸神之锻炉 ME 接口 + 转运器自动化安装完成。")
     print("首次使用请编辑：")
     print("  edit " .. filesystem.concat(targetRoot, "exotic_quark.cfg"))
     print("  edit " .. filesystem.concat(targetRoot, "exotic_magmatter.cfg"))
@@ -263,8 +263,10 @@ local function main()
     for _, name in ipairs({ "exotic_quark.cfg", "exotic_magmatter.cfg" }) do
         local path = filesystem.concat(targetRoot, name)
         local content = readAll(path)
-        if content:find("dualHatchAddress", 1, true) and not content:find("inputHatchSide", 1, true) then
-            print("警告：" .. name .. " 是旧版双输入配置，请删除 dualHatchAddress，添加 inputHatchSide。")
+        if not content:find("transposerAddress", 1, true) or
+            not content:find("interfaceAddress", 1, true) or
+            not content:find("interfaceSide", 1, true) then
+            print("警告：" .. name .. " 是旧版配置，请添加 transposerAddress、interfaceAddress、interfaceSide，并重新确认 inputHatchSide。")
         end
     end
 end

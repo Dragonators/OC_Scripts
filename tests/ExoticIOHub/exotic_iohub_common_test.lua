@@ -50,8 +50,6 @@ local function truthy(value, message)
 end
 
 equal(api.fluidDropNbt("plasma.iron"), '{Fluid:"plasma.iron"}', "AE2FC droplet NBT")
-equal(api.universalCellNbt("plasma.iron"),
-  '{Fluid:{FluidName:"plasma.iron",Amount:1000}}', "universal cell NBT")
 equal(api.dropletNameZh("plasma.radon"), "氡等离子体液滴", "Chinese droplet name")
 equal(api.dropletNameZh("plasma.test_only", "服务器中文名"), "服务器中文名液滴",
   "server Chinese label fallback")
@@ -211,7 +209,7 @@ local wrongDelta, wrongDeltaReason = api.buildMagmatterRequirements(magSnapshot(
 equal(wrongDelta, nil, "MagMatter non-positive delta rejected")
 truthy(wrongDeltaReason:match("大于"), "MagMatter delta reason")
 
-local safeNbt = pcall(api.universalCellNbt, 'plasma.bad"name')
+local safeNbt = pcall(api.fluidDropNbt, 'plasma.bad"name')
 equal(safeNbt, false, "unsafe fluid name rejected before NBT generation")
 
 local signatureA = api.snapshotSignature({

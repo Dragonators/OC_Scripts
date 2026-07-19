@@ -66,6 +66,7 @@ package.preload.event = function()
         for _, fluid in pairs(scenario.ioFluids) do if fluid then occupied = true; break end end
         if not occupied then
           scenario.ioFluids = scenario.refillFluids
+          scenario.hatchTanks = scenario.ioFluids
           scenario.ioItems = scenario.refillItems or scenario.ioItems
           scenario.didRefill = true
         end
@@ -73,9 +74,18 @@ package.preload.event = function()
       if scenario.startPending and not scenario.keepHatchLoaded then
         scenario.startPending = false
         scenario.hatchTanks = {}
+        scenario.ioFluids = scenario.hatchTanks
         scenario.machineTicks = scenario.machineDuration or 4
       elseif scenario.machineTicks > 0 then
         scenario.machineTicks = scenario.machineTicks - 1
+        if scenario.machineTicks == 0 and scenario.product then
+          scenario.hatchTanks[1] = {
+            name = scenario.product.name,
+            label = scenario.product.label,
+            amount = scenario.product.amount
+          }
+          scenario.ioFluids = scenario.hatchTanks
+        end
       end
       if scenario.events >= (scenario.quitAfter or 35) then
         return "key_down", "keyboard", string.byte("q"), 16
@@ -100,78 +110,19 @@ function database.get(slot)
   return stack
 end
 
-local iohub = { selectedItem = 1, selectedTank = 1 }
-function iohub.getStackInInternalSlot(slot) return scenario.ioItems[slot] end
-function iohub.getFluidInInternalTank(tank)
-  if scenario.componentDropped then error("iohub disconnected") end
-  return scenario.ioFluids[tank]
-end
-function iohub.select(slot) iohub.selectedItem = slot; return slot end
-function iohub.count(slot) return scenario.ioItems[slot] and scenario.ioItems[slot].size or 0, "items" end
-function iohub.sendItems(count)
-  local item = scenario.ioItems[iohub.selectedItem]
-  if not item or item.size ~= count then return 0 end
-  scenario.ioItems[iohub.selectedItem] = nil
-  scenario.sentItems = scenario.sentItems + count
-  scenario.sendTimes[#scenario.sendTimes + 1] = now
-  return count, "items"
-end
-function iohub.selectTank(tank) iohub.selectedTank = tank; return tank end
-function iohub.tankLevel(tank) return scenario.ioFluids[tank] and scenario.ioFluids[tank].amount or 0, "L" end
-function iohub.sendFluids(amount)
-  local fluid = scenario.ioFluids[iohub.selectedTank]
-  if not fluid or fluid.amount < amount or scenario.refundFailure then return 0 end
-  fluid.amount = fluid.amount - amount
-  if fluid.amount == 0 then scenario.ioFluids[iohub.selectedTank] = nil end
-  scenario.sentFluids = scenario.sentFluids + amount
-  if not scenario.loading then scenario.sentHintFluids = scenario.sentHintFluids + amount end
-  scenario.stock[fluid.name] = (scenario.stock[fluid.name] or 0) + amount
-  scenario.sendTimes[#scenario.sendTimes + 1] = now
-  return amount, "L"
-end
-function iohub.getFluidsInNetwork()
-  if scenario.aeDisconnected then error("AE network disconnected") end
-  local result = {}
-  for name, amount in pairs(scenario.stock) do result[#result + 1] = { name = name, amount = amount, label = name } end
-  return result
-end
-function iohub.getCraftables()
-  if not scenario.craftBehavior then return {} end
-  local status = {
-    hasFailed = function() return scenario.craftBehavior == "failed", "simulated failure" end,
-    isCanceled = function() return scenario.craftBehavior == "canceled", "simulated cancellation" end,
-    isDone = function() return scenario.craftBehavior == "done_insufficient" end
-  }
-  return { { request = function() scenario.craftRequests = scenario.craftRequests + 1; return status end } }
-end
-function iohub.getCpus()
-  local cpu = { cancel = function() scenario.cpuCancels = scenario.cpuCancels + 1; return true end }
-  local busy = scenario.cpuBusy == true or (scenario.craftBehavior == "timeout" and scenario.craftRequests > 0)
-  return { { name = "Test CPU", busy = busy, cpu = cpu } }
-end
-function iohub.getTankCount() return scenario.hatchCount or 9 end
-function iohub.getTankLevel(_, tank)
-  local fluid = scenario.hatchTanks[tank]
-  return fluid and fluid.amount or 0
-end
-function iohub.getTankCapacity() return scenario.hatchCapacity or 2147483647 end
-function iohub.getFluidInTank(_, tank) return scenario.hatchTanks[tank] end
-
 local function databaseFluid(slot)
   local stack = database.slots[slot]
-  return stack and stack.nbt and stack.nbt:match('FluidName:"([^"]+)"')
+  return stack and stack.nbt and stack.nbt:match('Fluid:"([^"]+)"')
 end
 
-function iohub.requestFluids(_, slot, amount)
-  if scenario.requestFailure then return 0 end
-  local name = databaseFluid(slot)
+local function refillInterface()
+  local name = scenario.interfaceConfigured
+  if not name or scenario.requestFailure or scenario.interfaceTank then return end
   local available = scenario.stock[name] or 0
-  local extracted = math.min(amount, available, scenario.ioTankCapacity or 1000000)
-  if extracted <= 0 or scenario.ioFluids[iohub.selectedTank] then return 0 end
+  local extracted = math.min(16000, available)
+  if extracted <= 0 then return end
   scenario.stock[name] = available - extracted
-  scenario.ioFluids[iohub.selectedTank] = { name = name, label = name, amount = extracted }
-  scenario.loading = true
-  return extracted
+  scenario.interfaceTank = { name = name, label = name, amount = extracted }
 end
 
 local function findHatchTank(name)
@@ -184,37 +135,126 @@ local function findHatchTank(name)
   return empty
 end
 
-function iohub.fillRobot(_, amount)
-  local fluid = scenario.ioFluids[iohub.selectedTank]
-  if not fluid or scenario.fillFailure then return nil, "simulated fill failure" end
-  local moved = scenario.partialFill and math.max(1, amount - 1) or amount
-  local tank = findHatchTank(fluid.name)
-  if not tank then return nil, "no space" end
-  local target = scenario.hatchTanks[tank]
-  if not target then target = { name = fluid.name, label = fluid.label, amount = 0 }; scenario.hatchTanks[tank] = target end
-  target.amount = target.amount + moved
-  fluid.amount = fluid.amount - moved
-  if fluid.amount == 0 then scenario.ioFluids[iohub.selectedTank] = nil end
-  scenario.injected[fluid.name] = (scenario.injected[fluid.name] or 0) + moved
-  local kinds = 0
-  for _ in pairs(scenario.injected) do kinds = kinds + 1 end
-  if kinds == (scenario.expectedKinds or 7) then scenario.startPending = true end
-  return true, moved
+local interface = {}
+function interface.getFluidsInNetwork()
+  if scenario.aeDisconnected then error("AE network disconnected") end
+  local result = {}
+  for name, amount in pairs(scenario.stock) do result[#result + 1] = { name = name, amount = amount, label = name } end
+  return result
+end
+function interface.getCraftables()
+  if not scenario.craftBehavior then return {} end
+  local status = {
+    hasFailed = function() return scenario.craftBehavior == "failed", "simulated failure" end,
+    isCanceled = function() return scenario.craftBehavior == "canceled", "simulated cancellation" end,
+    isDone = function() return scenario.craftBehavior == "done_insufficient" end
+  }
+  return { { request = function() scenario.craftRequests = scenario.craftRequests + 1; return status end } }
+end
+function interface.getCpus()
+  local cpu = { cancel = function() scenario.cpuCancels = scenario.cpuCancels + 1; return true end }
+  local busy = scenario.cpuBusy == true or (scenario.craftBehavior == "timeout" and scenario.craftRequests > 0)
+  return { { name = "Test CPU", busy = busy, cpu = cpu } }
+end
+function interface.getFluidInterfaceConfiguration()
+  return scenario.interfaceConfigured and { name = scenario.interfaceConfigured } or nil
+end
+function interface.setFluidInterfaceConfiguration(_, _, entry)
+  if entry == nil then
+    if scenario.interfaceTank then
+      local fluid = scenario.interfaceTank
+      scenario.stock[fluid.name] = (scenario.stock[fluid.name] or 0) + fluid.amount
+      scenario.interfaceTank = nil
+    end
+    scenario.interfaceConfigured = nil
+  else
+    scenario.interfaceConfigured = databaseFluid(entry)
+    scenario.loading = true
+    refillInterface()
+  end
+  return true
 end
 
-function iohub.drainRobot(_, amount)
-  if scenario.drainFailure then return nil, "simulated drain failure" end
-  for tank = 1, 9 do
-    local fluid = scenario.hatchTanks[tank]
-    if fluid then
-      local moved = math.min(amount, fluid.amount, scenario.ioTankCapacity or 1000000)
-      scenario.ioFluids[iohub.selectedTank] = { name = fluid.name, label = fluid.label, amount = moved }
-      fluid.amount = fluid.amount - moved
-      if fluid.amount == 0 then scenario.hatchTanks[tank] = nil end
-      return true, moved
-    end
+local transposer = {}
+function transposer.getInventorySize(side)
+  return side == 3 and 32 or 0
+end
+function transposer.getStackInSlot(side, slot)
+  return side == 3 and scenario.ioItems[slot] or nil
+end
+function transposer.getTankCount(side)
+  if side == 2 then return 6 end
+  return scenario.hatchCount or 9
+end
+function transposer.getTankLevel(side, tank)
+  local fluid
+  if side == 2 then fluid = tank == 1 and scenario.interfaceTank or nil
+  else fluid = scenario.hatchTanks[tank] end
+  return fluid and fluid.amount or 0
+end
+function transposer.getTankCapacity(side)
+  return side == 2 and 16000 or (scenario.hatchCapacity or 2147483647)
+end
+function transposer.getFluidInTank(side, tank)
+  if scenario.componentDropped then error("transposer disconnected") end
+  if side == 2 then return tank == 1 and scenario.interfaceTank or nil end
+  return scenario.hatchTanks[tank]
+end
+function transposer.transferItem(sourceSide, sinkSide, amount, sourceSlot)
+  if sourceSide ~= 3 or sinkSide ~= 2 then return 0 end
+  local item = scenario.ioItems[sourceSlot]
+  if not item or item.size < amount then return 0 end
+  item.size = item.size - amount
+  if item.size == 0 then scenario.ioItems[sourceSlot] = nil end
+  scenario.sentItems = scenario.sentItems + amount
+  scenario.sendTimes[#scenario.sendTimes + 1] = now
+  return amount
+end
+function transposer.transferFluid(sourceSide, sinkSide, amount, sourceTank)
+  if sourceSide == 2 and sinkSide == 3 then
+    local fluid = scenario.interfaceTank
+    if not fluid or scenario.fillFailure then return nil, "simulated transfer failure" end
+    local requested = math.min(amount, fluid.amount)
+    local moved = scenario.partialFill and math.max(1, requested - 1) or requested
+    local tank = findHatchTank(fluid.name)
+    if not tank then return nil, "no space" end
+    local target = scenario.hatchTanks[tank]
+    if not target then target = { name = fluid.name, label = fluid.label, amount = 0 }; scenario.hatchTanks[tank] = target end
+    target.amount = target.amount + moved
+    fluid.amount = fluid.amount - moved
+    if fluid.amount == 0 then scenario.interfaceTank = nil end
+    scenario.injected[fluid.name] = (scenario.injected[fluid.name] or 0) + moved
+    local kinds = 0
+    for _ in pairs(scenario.injected) do kinds = kinds + 1 end
+    if kinds == (scenario.expectedKinds or 7) then scenario.startPending = true end
+    refillInterface()
+    return true, moved
   end
-  return nil, "empty"
+
+  if sourceSide == 3 and sinkSide == 2 then
+    if scenario.loading and (scenario.drainFailure or scenario.refundFailure) then
+      return nil, "simulated refund failure"
+    end
+    local tank = (sourceTank or 0) + 1
+    local fluid = scenario.hatchTanks[tank]
+    if not fluid then return nil, "empty" end
+    local moved = math.min(amount, fluid.amount)
+    scenario.stock[fluid.name] = (scenario.stock[fluid.name] or 0) + moved
+    scenario.sentFluids = scenario.sentFluids + moved
+    if not scenario.loading then scenario.sentHintFluids = scenario.sentHintFluids + moved end
+    scenario.sendTimes[#scenario.sendTimes + 1] = now
+    fluid.amount = fluid.amount - moved
+    if fluid.amount == 0 then scenario.hatchTanks[tank] = nil end
+    return true, moved
+  end
+
+  return nil, "unsupported direction"
+end
+
+-- Kept as a separate assertion point for transfer accounting.
+local function assertNoInterfaceResidue()
+  assert(not scenario.interfaceTank and not scenario.interfaceConfigured,
+    "ME interface must be empty and unconfigured after dispatch")
 end
 
 local machine = {}
@@ -251,9 +291,10 @@ local function wrapOcProxy(proxy)
 end
 
 local proxies = {
-  iohub = wrapOcProxy(iohub), database = wrapOcProxy(database), machine = wrapOcProxy(machine), gpu = wrapOcProxy(gpu)
+  interface = wrapOcProxy(interface), transposer = wrapOcProxy(transposer),
+  database = wrapOcProxy(database), machine = wrapOcProxy(machine), gpu = wrapOcProxy(gpu)
 }
-local directMethods = { iohub = { count = true, tankLevel = true } }
+local directMethods = {}
 package.preload.component = function()
   return {
     get = function(prefix) return prefix end,
@@ -271,7 +312,7 @@ package.preload.component = function()
 end
 
 local componentMock = require("component")
-assert(componentMock.methods("iohub").getStackInInternalSlot == false,
+assert(componentMock.methods("transposer").getStackInSlot == false,
   "non-direct OC callbacks must be represented by false, not treated as missing")
 assert(componentMock.methods("database").size == nil, "database size is not an OC callback")
 
@@ -280,14 +321,15 @@ local function reset(base)
   now, virtualFiles, database.slots = 0, {}, {}
   scenario = base
   scenario.ioItems = scenario.items or {}
-  scenario.ioFluids = scenario.fluids or {}
-  scenario.hatchTanks = scenario.hatchTanks or {}
+  scenario.hatchTanks = scenario.hatchTanks or scenario.fluids or {}
+  scenario.ioFluids = scenario.hatchTanks
   scenario.stock = scenario.stock or {}
   scenario.events, scenario.machineTicks = 0, 0
   scenario.sentItems, scenario.sentFluids, scenario.sentHintFluids = 0, 0, 0
   scenario.craftRequests, scenario.cpuCancels = 0, 0
   scenario.screenText, scenario.resolutions, scenario.sendTimes = "", {}, {}
   scenario.injected, scenario.didRefill, scenario.loading = {}, false, false
+  scenario.interfaceTank, scenario.interfaceConfigured = nil, nil
 end
 
 local function usedResolution(width, height)
@@ -301,12 +343,37 @@ for index = 1, 7 do
   quarkFluids[index] = { name = "material" .. index, label = "Material " .. index, amount = index }
   quarkStock["plasma.material" .. index] = index * 1000
 end
-reset({ fluids = quarkFluids, stock = quarkStock })
+reset({
+  fluids = quarkFluids,
+  stock = quarkStock,
+  product = { name = "fluid.quarkgluonplasma", label = "Quark-Gluon Plasma", amount = 100 }
+})
 assert(common.run({ mode = "quark", title = "Quark smoke" },
   "tests/ExoticIOHub/exotic_quark_smoke.cfg"))
-for index = 1, 7 do assert(scenario.injected["plasma.material" .. index] == index * 1000) end
+for index = 1, 7 do
+  local name = "plasma.material" .. index
+  assert(scenario.injected[name] == index * 1000,
+    name .. " injected=" .. tostring(scenario.injected[name]) .. "; screen=" .. scenario.screenText)
+end
+assertNoInterfaceResidue()
 assert(scenario.sentHintFluids == 28, "all quark hints must return to AE")
+assert(scenario.stock["fluid.quarkgluonplasma"] == 100, "finished product must return through the ME interface")
 assert(usedResolution(80, 25), "quark GUI must render at 80x25")
+
+local largeFluids, largeStock = {}, {}
+for index = 1, 7 do
+  local amount = index + 16
+  largeFluids[index] = { name = "large" .. index, label = "Large " .. index, amount = amount }
+  largeStock["plasma.large" .. index] = amount * 1000
+end
+reset({ fluids = largeFluids, stock = largeStock })
+assert(common.run({ mode = "quark", title = "Quark interface refill" },
+  "tests/ExoticIOHub/exotic_quark_smoke.cfg"))
+for index = 1, 7 do
+  local name, expected = "plasma.large" .. index, (index + 16) * 1000
+  assert(scenario.injected[name] == expected, "interface must refill beyond its 16000 L buffer")
+end
+assertNoInterfaceResidue()
 
 local refillFluids, refillStock, initialFluids = {}, {}, {}
 for index = 1, 7 do
@@ -334,6 +401,7 @@ assert(common.run({ mode = "magmatter", title = "MagMatter smoke" },
   "tests/ExoticIOHub/exotic_magmatter_smoke.cfg"))
 assert(scenario.injected["plasma.hypogen"] == 7200 and scenario.injected["fluid.temporalfluid"] == 10 and
   scenario.injected["fluid.spatialfluid"] == 60, "MagMatter must inject three fluids")
+assertNoInterfaceResidue()
 assert(scenario.sentItems == 1 and scenario.sentHintFluids == 70, "MagMatter hints must return to AE")
 assert(usedResolution(120, 35), "MagMatter GUI must render at 120x35")
 
@@ -353,28 +421,32 @@ end
 
 reset({ hatchTanks = { [1] = { name = "water", amount = 1000 } }, quitAfter = 3 })
 assert(common.run({ mode = "quark", title = "Dirty start" }, faultConfig))
-assert(screenHas("启动时九重输入仓存在无归属残留"), "dirty ninefold hatch must latch")
+assert(screenHas("启动时进阶存储输入仓存在非本模式残留"), "dirty input hatch must latch")
 assert(scenario.hatchTanks[1], "dirty startup must not auto-refund")
 
 faultQuark({ stocked = true, partialFill = true, quitAfter = 25 })
-assert(screenHas("装载失败") and screenHas("回送 AE"), "partial IO Hub injection must refund and latch")
+assert(screenHas("装载失败") and screenHas("回送 AE"), "partial transposer injection must refund and latch")
 local hatchLeft = false
 for _, fluid in pairs(scenario.hatchTanks) do if fluid then hatchLeft = true end end
-assert(not hatchLeft, "partial load must be recovered from the ninefold hatch")
+assert(not hatchLeft, "partial load must be recovered from the input hatch")
 
 faultQuark({ stocked = true, requestFailure = true, quitAfter = 25 })
-assert(screenHas("从 AE 提取失败") and screenHas("已把本轮流体回送 AE"),
-  "request failure must leave no staged input; screen=" .. scenario.screenText)
+assert(screenHas("ME 二合一接口等待流体超时") and screenHas("已把本轮流体回送 AE"),
+  "interface supply failure must leave no staged input; screen=" .. scenario.screenText)
 
 faultQuark({ stocked = true, keepHatchLoaded = true, quitAfter = 30 })
-assert(screenHas("机器启动超时") and screenHas("九重仓原料已回送 AE"),
-  "start timeout must return the ninefold contents")
+assert(screenHas("机器启动超时") and screenHas("输入仓原料已回送 AE"),
+  "start timeout must return the input hatch contents")
 
 faultQuark({ stocked = true, keepHatchLoaded = true, drainFailure = true, quitAfter = 30 })
-assert(screenHas("九重仓回送失败") or screenHas("回送失败"), "failed recovery must preserve a locked fault")
+assert(screenHas("输入仓回送失败") or screenHas("回送失败"), "failed recovery must preserve a locked fault")
 
 faultQuark({ aeDisconnected = true, quitAfter = 15 })
 assert(screenHas("getFluidsInNetwork") and screenHas("故障锁定"), "AE disconnection must latch")
+
+faultQuark({ componentDropped = true, quitAfter = 5 })
+assert(screenHas("读取进阶存储输入仓流体槽失败") and screenHas("故障锁定"),
+  "component loss must latch; screen=" .. scenario.screenText)
 
 faultQuark({ quitAfter = 18 })
 assert(screenHas("氡等离子体液滴") and screenHas("缺少样板"), "missing patterns must use Chinese labels")
@@ -385,4 +457,4 @@ assert(screenHas("合成超时") and scenario.cpuCancels == 1, "craft timeout mu
 faultQuark({ stocked = true, machineDuration = 20, quitAfter = 30 })
 assert(screenHas("机器运行超过 recipeTimeout"), "recipe timeout must preserve the running state")
 
-print("exotic_runtime_smoke_test: IO Hub to ninefold input hatch cycles and fault recovery passed")
+print("exotic_runtime_smoke_test: ME interface and transposer dispatch cycles and fault recovery passed")

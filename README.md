@@ -15,15 +15,16 @@ lua /tmp/beemaster-install.lua /home
 
 The installer preserves an existing `config.lua`, adds `worldAccelerator_mode = "fixed"` when upgrading an older BeeMasterXXL configuration, and does not touch `data.txt`.
 
-## Forge of Gods Exotic IO Hub + ninefold hatch automation
+## Forge of Gods ME interface + transposer automation
 
 Installs the complete MagMatter and Quark-Gluon Plasma automation package into
 OpenOS `/home`. Existing `exotic_quark.cfg` and `exotic_magmatter.cfg` files are
-preserved. Version 7 removes `DualInputHachOC`: the IO Hub now injects fluids
-directly into an adjacent ninefold input hatch.
+preserved. Version 8 restores the Wiki-style advanced storage input hatch,
+ME dual fluid interface and transposer topology. All hint items and fluids are
+returned to the main AE network; no IO Hub or matter condenser is required.
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v7/src/ExoticIOHub/install.lua /tmp/exotic-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v8/src/ExoticIOHub/install.lua /tmp/exotic-install.lua
 lua /tmp/exotic-install.lua /home
 ```
 
