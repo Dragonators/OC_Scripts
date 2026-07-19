@@ -1,5 +1,6 @@
 local files = {
-  ["/home/exotic_quark.cfg"] = "return { preserved = true }\n"
+  ["/home/fog_quark.cfg"] = "return { mode = \"quark\", preserved = true }\n",
+  ["/home/exotic_quark.cfg"] = "legacy v8 config must remain untouched\n"
 }
 local directories = { ["/"] = true, ["/home"] = true }
 
@@ -109,10 +110,10 @@ package.preload.internet = function()
     request = function(url)
       local name = url:match("/([^/]+)$")
       local content
-      if name == "exotic_quark.cfg" then
+      if name == "fog_quark.cfg" then
         error("preserved config must not be downloaded")
-      elseif name and name:sub(-4) == ".cfg" then
-        content = "return { fresh = true }\n"
+      elseif name == "fog_magmatter.cfg" then
+        content = "return { mode = \"magmatter\", fresh = true }\n"
       elseif name and name:sub(-4) == ".lua" then
         content = "return true\n"
       else
@@ -131,18 +132,64 @@ end
 local installer = assert(loadfile("src/ExoticIOHub/install.lua"))
 installer("/home")
 
-assert(files["/home/exotic_quark.cfg"] == "return { preserved = true }\n",
+assert(files["/home/fog_quark.cfg"] == "return { mode = \"quark\", preserved = true }\n",
   "existing quark config must be preserved")
-assert(files["/home/exotic_magmatter.cfg"] == "return { fresh = true }\n",
+assert(files["/home/fog_magmatter.cfg"] == "return { mode = \"magmatter\", fresh = true }\n",
   "missing MagMatter config must be installed")
+assert(files["/home/exotic_quark.cfg"] == "legacy v8 config must remain untouched\n",
+  "v8 config must not be migrated or modified")
 for _, name in ipairs({
-  "exotic_iohub_common.lua", "exotic_zh_cn.lua", "exotic_quark_iohub.lua",
-  "exotic_magmatter_iohub.lua", "quark.lua", "magmatter.lua",
-  "EXOTIC_IOHUB.md", "exotic_iohub_install.lua"
+  "fog_exotic.lua", "quark.lua", "magmatter.lua",
+  "FOG_EXOTIC.md", "fog_exotic_install.lua"
 }) do
   assert(files["/home/" .. name], "missing installed file: " .. name)
 end
-assert(not directories["/home/.exotic-iohub-install-stage"], "stage directory must be removed")
-assert(not directories["/home/.exotic-iohub-install-rollback"], "rollback directory must be removed")
+assert(files["/home/quark.lua"]:find("/home/fog_quark.cfg", 1, true),
+  "quark compatibility entry point must use the v9 config")
+assert(files["/home/magmatter.lua"]:find("/home/fog_magmatter.cfg", 1, true),
+  "MagMatter compatibility entry point must use the v9 config")
+assert(not directories["/home/.fog-exotic-install-stage"], "stage directory must be removed")
+assert(not directories["/home/.fog-exotic-install-rollback"], "rollback directory must be removed")
 
-print("install_smoke_test: transactional install and config preservation passed")
+-- Force one promotion failure. Every previously installed file must be restored,
+-- and the following run must recover the ACTIVE marker before reinstalling.
+local beforeFailure = {}
+for path, content in pairs(files) do beforeFailure[path] = content end
+
+local filesystem = require("filesystem")
+local realRename = filesystem.rename
+local failOnce = true
+filesystem.rename = function(from, to)
+  from, to = normalize(from), normalize(to)
+  if failOnce and
+      from == "/home/.fog-exotic-install-stage/fog_exotic.lua" and
+      to == "/home/fog_exotic.lua" then
+    failOnce = false
+    return false, "simulated promotion failure"
+  end
+  return realRename(from, to)
+end
+
+local realExit = os.exit
+os.exit = function(code) error("__INSTALL_EXIT_" .. tostring(code) .. "__", 0) end
+local failedRun = assert(loadfile("src/ExoticIOHub/install.lua"))
+local failedOK, failedReason = pcall(failedRun, "/home")
+assert(not failedOK and tostring(failedReason):find("__INSTALL_EXIT_1__", 1, true),
+  "promotion failure must return installer exit code 1")
+os.exit = realExit
+filesystem.rename = realRename
+
+for path, content in pairs(beforeFailure) do
+  assert(files[path] == content, "rollback changed existing file: " .. path)
+end
+assert(files["/home/exotic_quark.cfg"] == "legacy v8 config must remain untouched\n",
+  "rollback must not touch unrelated v8 files")
+assert(directories["/home/.fog-exotic-install-rollback"],
+  "failed install must leave its recovery journal")
+
+local recoveryRun = assert(loadfile("src/ExoticIOHub/install.lua"))
+recoveryRun("/home")
+assert(not directories["/home/.fog-exotic-install-stage"], "recovery must remove stage directory")
+assert(not directories["/home/.fog-exotic-install-rollback"], "recovery must remove rollback directory")
+
+print("install_smoke_test: v9 install, config isolation, rollback and recovery passed")
