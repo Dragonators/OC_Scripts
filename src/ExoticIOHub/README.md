@@ -83,10 +83,10 @@ OC 服务器/线缆   ────────────┘                   
 等离子单元元数据探针。该顺序兼容当前 OpenComputers 默认关闭
 `insertIdsInConverters` 的配置。
 
-部分实际环境不会向 `component.methods()` 暴露 IO Hub 的
-`getStackInInternalSlot`。共享模块会自动改用 `storeInternal` 把内部物品描述写入
-数据库探针槽后读取；物品本身不会离开 IO Hub，也不会被数据库复制或吞掉。此
-兼容路径需要数据库的 `clear` 回调，标准 OC 数据库卡已提供。
+共享模块按 OpenOS 的真实语义检查回调：`component.methods()` 返回的 `false`
+表示回调存在但不是 direct，只有返回 `nil` 才表示回调缺失。组件代理中的回调
+可以是带 `__call` 的可调用表，因此脚本不使用 `type(method) == "function"` 判断
+回调是否存在。
 
 ## GUI 与恢复
 
@@ -134,7 +134,8 @@ npx -y --package fengari-node-cli fengari scripts/opencomputers/tests/exotic_run
 ```
 
 核心测试覆盖 GT、GT++、BartWorks 映射、三种换算、中文宽度与回退、任务结果
-校验；运行时模拟覆盖两个完整周期、缺失物品检查回调时的数据库降级，以及错误脚本、脏启动、缺失样板、CPU 忙碌、
+校验；运行时模拟使用真实的“可调用回调表”和 direct 布尔值，覆盖两个完整周期，
+以及错误脚本、脏启动、缺失样板、CPU 忙碌、
 合成失败/取消/超时/产量不足、AE 或组件断线、部分提交、退款失败和机器超时。
 模拟测试不能替代最终上机验收；正式投产前仍应各跑一轮，并核对双输入库存与 AE
 流体账目。

@@ -90,23 +90,8 @@ function database.get(slot)
   end
   return stack
 end
-function database.clear(slot)
-  local existed = database.slots[slot] ~= nil
-  database.slots[slot] = nil
-  return existed
-end
-
 local iohub = { selectedItem = 1, selectedTank = 1 }
 function iohub.getStackInInternalSlot(slot) return scenario.items[slot] end
-function iohub.storeInternal(slot, _, databaseSlot)
-  local item = scenario.items[slot]
-  if not item then error("cannot store an empty internal slot") end
-  local copy = {}
-  for key, value in pairs(item) do copy[key] = value end
-  database.slots[databaseSlot] = copy
-  scenario.databaseInspections = scenario.databaseInspections + 1
-  return false
-end
 function iohub.getFluidInInternalTank(tank)
   if scenario.componentDropped then error("iohub disconnected") end
   return scenario.fluids[tank]
@@ -223,7 +208,27 @@ function gpu.set(x, y, value)
   return true
 end
 
-local proxies = { iohub = iohub, dual = dual, database = database, machine = machine, gpu = gpu }
+local function wrapOcProxy(proxy)
+  for name, value in pairs(proxy) do
+    if type(value) == "function" then
+      proxy[name] = setmetatable({ invoke = value }, {
+        __call = function(self, ...) return self.invoke(...) end
+      })
+    end
+  end
+  return proxy
+end
+
+local proxies = {
+  iohub = wrapOcProxy(iohub),
+  dual = wrapOcProxy(dual),
+  database = wrapOcProxy(database),
+  machine = wrapOcProxy(machine),
+  gpu = wrapOcProxy(gpu)
+}
+local directMethods = {
+  iohub = { count = true, tankLevel = true }
+}
 package.preload.component = function()
   return {
     get = function(prefix) return prefix end,
@@ -232,15 +237,22 @@ package.preload.component = function()
     methods = function(address)
       local result = {}
       for name, value in pairs(proxies[address] or {}) do
-        if type(value) == "function" and not
-            (address == "iohub" and scenario.noDirectInspection and name == "getStackInInternalSlot") then
-          result[name] = true
+        local meta = type(value) == "table" and getmetatable(value) or nil
+        if meta and meta.__call then
+          result[name] = directMethods[address] and directMethods[address][name] == true or false
         end
       end
       return result
     end
   }
 end
+
+local componentMock = require("component")
+local ioMethods = componentMock.methods("iohub")
+assert(ioMethods.getStackInInternalSlot == false and ioMethods.getFluidInInternalTank == false,
+  "non-direct OC callbacks must be represented by false, not treated as missing")
+assert(ioMethods.count == true and type(proxies.iohub.getStackInInternalSlot) == "table",
+  "OC component callbacks must be exercised as callable proxy tables")
 
 local common = require("exotic_iohub_common")
 
@@ -268,7 +280,6 @@ local function reset(base)
   scenario.refundCount = 0
   scenario.craftRequests = 0
   scenario.cpuCancels = 0
-  scenario.databaseInspections = 0
   scenario.screen = {}
   scenario.screenText = ""
   scenario.resolutions = {}
@@ -304,16 +315,13 @@ reset({
     ["plasma.hypogen"] = 50 * 144,
     ["fluid.temporalfluid"] = 10,
     ["fluid.spatialfluid"] = 60
-  },
-  noDirectInspection = true
+  }
 })
 assert(common.run({ mode = "magmatter", title = "MagMatter smoke" },
   "tests/ExoticIOHub/exotic_magmatter_smoke.cfg"))
 assert(#scenario.submitted == 3, "MagMatter must submit plasma, temporal and spatial fluid together")
 assert(scenario.sentItems == 1, "MagMatter dust hint must return to AE")
 assert(scenario.sentFluids == 70, "MagMatter temporal/spatial hints must return to AE")
-assert(scenario.databaseInspections >= 2,
-  "missing getStackInInternalSlot must fall back to storeInternal plus database")
 assert(usedResolution(120, 35), "MagMatter GUI must render at 120x35")
 
 local faultConfig = "tests/ExoticIOHub/exotic_fault_smoke.cfg"
