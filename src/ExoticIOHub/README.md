@@ -83,6 +83,11 @@ OC 服务器/线缆   ────────────┘                   
 等离子单元元数据探针。该顺序兼容当前 OpenComputers 默认关闭
 `insertIdsInConverters` 的配置。
 
+部分实际环境不会向 `component.methods()` 暴露 IO Hub 的
+`getStackInInternalSlot`。共享模块会自动改用 `storeInternal` 把内部物品描述写入
+数据库探针槽后读取；物品本身不会离开 IO Hub，也不会被数据库复制或吞掉。此
+兼容路径需要数据库的 `clear` 回调，标准 OC 数据库卡已提供。
+
 ## GUI 与恢复
 
 GUI 最低需要 80×25，推荐 120×35。缺失样板使用当前整合包
@@ -109,8 +114,8 @@ GUI 最低需要 80×25，推荐 120×35。缺失样板使用当前整合包
 
 ```lua
 local component = require("component")
-local io = component.proxy(component.get("iohub"))
-local dual = component.proxy(component.get("dualhatch"))
+local io = component.proxy(component.list("iohub", true)())
+local dual = component.proxy(component.list("dualhatch", true)())
 for name in pairs(component.methods(io.address)) do print("iohub", name) end
 for name in pairs(component.methods(dual.address)) do print("dualhatch", name) end
 ```
@@ -124,13 +129,12 @@ CPU 可见。
 仓库测试使用 Lua 5.2 兼容的 Fengari 运行：
 
 ```powershell
-npx -y --package fengari-node-cli fengari tests/ExoticIOHub/exotic_iohub_common_test.lua
-npx -y --package fengari-node-cli fengari tests/ExoticIOHub/exotic_runtime_smoke_test.lua
-npx -y --package fengari-node-cli fengari tests/ExoticIOHub/install_smoke_test.lua
+npx -y --package fengari-node-cli fengari scripts/opencomputers/tests/exotic_iohub_common_test.lua
+npx -y --package fengari-node-cli fengari scripts/opencomputers/tests/exotic_runtime_smoke_test.lua
 ```
 
 核心测试覆盖 GT、GT++、BartWorks 映射、三种换算、中文宽度与回退、任务结果
-校验；运行时模拟覆盖两个完整周期，以及错误脚本、脏启动、缺失样板、CPU 忙碌、
+校验；运行时模拟覆盖两个完整周期、缺失物品检查回调时的数据库降级，以及错误脚本、脏启动、缺失样板、CPU 忙碌、
 合成失败/取消/超时/产量不足、AE 或组件断线、部分提交、退款失败和机器超时。
 模拟测试不能替代最终上机验收；正式投产前仍应各跑一轮，并核对双输入库存与 AE
 流体账目。

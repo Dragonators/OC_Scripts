@@ -402,6 +402,7 @@ function M.run(profile, configPath)
   }
 
   local devices, addresses = {}, {}
+  local readInternalItem
   local gpu, oldUi = nil, {}
 
   local function log(level, message)
@@ -462,9 +463,7 @@ function M.run(profile, configPath)
   local function readSnapshot()
     local snapshot = { items = {}, fluids = {} }
     for slot = 1, 32 do
-      local result = resultCall(devices.iohub, "getStackInInternalSlot", slot)
-      if not result.ok then error("读取 IO 枢纽物品槽失败: " .. result.error) end
-      local item = result.values[1]
+      local item = readInternalItem(slot)
       if type(item) == "table" and tonumber(item.size or 0) > 0 then
         local oreNames = nil
         if type(item.oreNames) == "table" then
@@ -540,13 +539,50 @@ function M.run(profile, configPath)
     gpu = devices.gpu
 
     validateMethods(addresses.iohub, "IO 枢纽", {
-      "getStackInInternalSlot", "getFluidInInternalTank", "select", "count", "selectTank", "tankLevel",
+      "getFluidInInternalTank", "select", "count", "selectTank", "tankLevel",
       "sendItems", "sendFluids", "getFluidsInNetwork", "getCraftables", "getCpus"
     })
     validateMethods(addresses.dual, "OC 二合一输入枢纽",
       { "addTask", "cancelTask", "submitTask", "isEmpty", "refund" })
     validateMethods(addresses.database, "数据库", { "get", "set", "size" })
     validateMethods(addresses.machine, "gt_machine", { "getWorkProgress", "getWorkMaxProgress", "isMachineActive" })
+
+    local ioMethods = component.methods(addresses.iohub)
+    local directInspection = ioMethods.getStackInInternalSlot ~= nil
+    local databaseInspection = ioMethods.storeInternal ~= nil
+    if not directInspection and not databaseInspection then
+      local names = {}
+      for name in pairs(ioMethods) do names[#names + 1] = name end
+      table.sort(names)
+      error("IO 枢纽既没有 getStackInInternalSlot，也没有 storeInternal；实际回调: " .. table.concat(names, ", "))
+    end
+    if databaseInspection then validateMethods(addresses.database, "数据库", { "clear" }) end
+
+    readInternalItem = function(slot)
+      if directInspection then
+        local result = resultCall(devices.iohub, "getStackInInternalSlot", slot)
+        if result.ok and not (result.values[1] == nil and result.values[2] ~= nil) then
+          return result.values[1]
+        end
+        if not databaseInspection then
+          error("读取 IO 枢纽物品槽失败: " .. tostring(result.error or result.values[2]))
+        end
+        directInspection = false
+        log("warn", "直接物品检查不可用，已切换为数据库安全探测")
+      end
+
+      local amount = tonumber(valueCall(devices.iohub, "count", slot)) or 0
+      if amount <= 0 then return nil end
+      local probeSlot = config.databaseSlots.plasmaProbe
+      valueCall(devices.database, "clear", probeSlot)
+      local stored = resultCall(devices.iohub, "storeInternal", slot, addresses.database, probeSlot)
+      if not stored.ok then error("IO 枢纽数据库探测失败: " .. stored.error) end
+      local item = valueCall(devices.database, "get", probeSlot)
+      if type(item) ~= "table" then error("IO 枢纽物品槽 " .. slot .. " 探测结果为空") end
+      return item
+    end
+
+    if not directInspection then log("warn", "IO 枢纽使用 storeInternal + 数据库读取内部物品") end
 
     local needed = math.max(config.databaseSlots.fluidCellStart + 6, config.databaseSlots.craftDrop,
       config.databaseSlots.plasmaProbe)
@@ -663,7 +699,7 @@ function M.run(profile, configPath)
   end
 
   local function sendItemToAE(hint)
-    local current = valueCall(devices.iohub, "getStackInInternalSlot", hint.slot)
+    local current = readInternalItem(hint.slot)
     if current ~= nil and (current.name ~= hint.name or tonumber(current.damage) ~= tonumber(hint.damage)
         or tonumber(current.size) ~= tonumber(hint.size)) then
       error("物品槽 " .. hint.slot .. " 已被未知物品替换，拒绝回送")
