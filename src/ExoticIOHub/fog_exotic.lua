@@ -30,16 +30,22 @@ if config.mode ~= "quark" and config.mode ~= "magmatter" then
 end
 
 local timing = {
-  poll = config.timing.poll or 1,
+  poll = config.timing.poll or 0.25,
   stableScans = config.timing.stableScans or 2,
   interfaceWarmup = config.timing.interfaceWarmup or 0.75,
   interfaceClearTimeout = config.timing.interfaceClearTimeout or 8,
   returnStallTimeout = config.timing.returnStallTimeout or 10,
   missingPatternRetry = config.timing.missingPatternRetry or 5,
-  craftPoll = config.timing.craftPoll or 1,
+  craftPoll = config.timing.craftPoll or 0.25,
   craftWarningAfter = config.timing.craftWarningAfter or 600,
-  cycleSettle = config.timing.cycleSettle or 2,
+  interfaceSupplyGrace = config.timing.interfaceSupplyGrace or 2,
+  transferYield = config.timing.transferYield or 0.05,
+  returnVerifyDelay = config.timing.returnVerifyDelay or 0.1,
+  advanceWarningAfter = config.timing.advanceWarningAfter or 30,
+  cycleSettle = config.timing.cycleSettle or 0.25,
 }
+
+local MAX_INTERFACE_SLOTS = 6
 
 local FLUID_ZH = {
   ["plasma.advancednitinol"] = "高级镍钛诺等离子体",
@@ -228,6 +234,9 @@ local ui = {
 local devices = {}
 local gpu
 local screenWidth, screenHeight = 80, 25
+local interfaceSlotCount = 1
+local configuredSlotCount = 0
+local interfaceKnownClear = false
 
 local function sideValue(value, key)
   if type(value) == "number" then return value end
@@ -298,13 +307,15 @@ local function render()
   for index = 1, math.min(#ui.requests, maxRows) do
     local request = ui.requests[index]
     local row = tableTop + index
-    local marker = index < ui.current and "✓" or (index == ui.current and "▶" or "·")
-    local color = index < ui.current and COLORS.good or (index == ui.current and COLORS.accent or COLORS.text)
+    local complete = (request.delivered or 0) >= request.amount
+    local active = request.status and request.status ~= "等待" and not complete
+    local marker = complete and "✓" or (active and "▶" or "·")
+    local color = complete and COLORS.good or (active and COLORS.accent or COLORS.text)
     gpuWrite(3, row, marker .. " " .. index, color)
     gpuWrite(7, row, clip(request.displayName, math.max(12, screenWidth - 42)), color)
     gpuWrite(math.max(32, screenWidth - 28), row, tostring(request.amount) .. " mB", COLORS.text)
-    local requestStatus = index < ui.current and "已送入" or (index == ui.current and "处理中" or "等待")
-    gpuWrite(math.max(46, screenWidth - 14), row, requestStatus, index < ui.current and COLORS.good or COLORS.muted)
+    local requestStatus = complete and "已送入" or (request.status or "等待")
+    gpuWrite(math.max(46, screenWidth - 14), row, requestStatus, complete and COLORS.good or COLORS.muted)
   end
 
   local progressY = screenHeight - 6
@@ -360,7 +371,9 @@ end
 local function assertMethods(proxy, label, required)
   local methods = component.methods(proxy.address)
   for _, name in ipairs(required) do
-    if not methods[name] then error(label .. " 缺少方法 " .. name, 0) end
+    -- component.methods() maps method name to callback directness. A false value
+    -- means the method exists but is non-direct; only nil means it is absent.
+    if methods[name] == nil then error(label .. " 缺少方法 " .. name, 0) end
   end
 end
 
@@ -380,6 +393,10 @@ local function setupComponents()
   })
   if devices.machine then assertMethods(devices.machine, "GT 机器", {"isWorkAllowed"}) end
 
+  local reportedTanks = devices.transposer.getTankCount(mainSide) or 0
+  if reportedTanks < 1 then error("二合一 ME 接口侧没有可见流体槽，请检查 main 方向", 0) end
+  interfaceSlotCount = math.min(MAX_INTERFACE_SLOTS, reportedTanks)
+
   local maxWidth, maxHeight = gpu.maxResolution()
   screenWidth = math.min(config.gui.width or 80, maxWidth)
   screenHeight = math.min(config.gui.height or 25, maxHeight)
@@ -387,7 +404,7 @@ local function setupComponents()
     error("屏幕分辨率至少需要 50x18，当前最大为 " .. maxWidth .. "x" .. maxHeight, 0)
   end
   gpu.setResolution(screenWidth, screenHeight)
-  log("组件自检通过；提示物只会返回主网")
+  log("组件自检通过；接口可并行使用 " .. interfaceSlotCount .. " 个流体槽")
 end
 
 local function checkedCall(label, fn, ...)
@@ -494,19 +511,44 @@ local function addRequest(requests, byFluid, fluidName, amount, source)
   table.insert(requests, request)
 end
 
+-- GTNH 2.8's Exotic Module can emit Iron/Copper dust hints while its
+-- ore-dictionary conversion silently drops the corresponding plasma input
+-- from the internal recipe. Supplying these two fluids only leaves a full
+-- stale batch in the ingredient buffer, so they are deliberately not sent.
+local FOG_OMITTED_QUARK_INPUTS = {
+  ["plasma.iron"] = true,
+  ["plasma.copper"] = true,
+}
+
 local function buildQuarkRequests(snapshot)
+  for _, fluid in ipairs(snapshot.fluids) do
+    if FOG_OMITTED_QUARK_INPUTS[string.lower(tostring(fluid.name or ""))] then
+      return nil, "检测到旧版本遗留的铁/铜等离子体；请先手动返回主网后再继续"
+    end
+  end
   if #snapshot.items + #snapshot.fluids ~= 7 then
     return nil, "等待 7 份提示，目前物品 " .. #snapshot.items .. "、流体 " .. #snapshot.fluids
   end
 
   local requests, byFluid = {}, {}
+  requests.ignored = {}
   for _, item in ipairs(snapshot.items) do
     if (item.size or 0) < 1 or item.size > 7 then
       return nil, "粉尘提示数量超出 1..7: " .. tostring(item.label or item.name)
     end
     local target, reason = plasmaFromItem(item)
     if not target then return nil, reason end
-    addRequest(requests, byFluid, target, item.size * 1296, tostring(item.label or item.name))
+    local amount = item.size * 1296
+    if FOG_OMITTED_QUARK_INPUTS[string.lower(target)] then
+      table.insert(requests.ignored, {
+        fluidName = target,
+        displayName = translatedFluid(target),
+        amount = amount,
+        source = tostring(item.label or item.name),
+      })
+    else
+      addRequest(requests, byFluid, target, amount, tostring(item.label or item.name))
+    end
   end
   for _, fluid in ipairs(snapshot.fluids) do
     if (fluid.amount or 0) < 1 or fluid.amount > 64 then
@@ -514,7 +556,17 @@ local function buildQuarkRequests(snapshot)
     end
     local suffix = fluidSuffix(fluid.name)
     if not suffix or suffix == "" then return nil, "无法识别流体 " .. tostring(fluid.name) end
-    addRequest(requests, byFluid, "plasma." .. string.lower(suffix), fluid.amount * 1000, tostring(fluid.label or fluid.name))
+    local target = "plasma." .. string.lower(suffix)
+    if FOG_OMITTED_QUARK_INPUTS[target] then
+      table.insert(requests.ignored, {
+        fluidName = target,
+        displayName = translatedFluid(target),
+        amount = fluid.amount * 1000,
+        source = tostring(fluid.label or fluid.name),
+      })
+    else
+      addRequest(requests, byFluid, target, fluid.amount * 1000, tostring(fluid.label or fluid.name))
+    end
   end
   return requests
 end
@@ -568,23 +620,44 @@ local function prepareDatabase(requests)
   end
 end
 
-local function clearInterface()
-  checkedCall("清空二合一接口配置失败", devices.interface.setFluidInterfaceConfiguration, 0)
+local function clearInterface(slotCount)
+  slotCount = slotCount or configuredSlotCount
+  for slot = 0, slotCount - 1 do
+    checkedCall("清空二合一接口配置失败", devices.interface.setFluidInterfaceConfiguration, slot)
+  end
+  configuredSlotCount = 0
+  interfaceKnownClear = false
 end
 
-local function interfaceFluid()
-  local fluid = devices.transposer.getFluidInTank(mainSide, 1)
+local function interfaceFluid(slot)
+  local fluid = devices.transposer.getFluidInTank(mainSide, (slot or 0) + 1)
   if fluid and (fluid.amount or 0) > 0 then return fluid end
   return nil
 end
 
-local function waitInterfaceClear()
+local function interfaceIsClear(slotCount)
+  for slot = 0, (slotCount or interfaceSlotCount) - 1 do
+    if interfaceFluid(slot) then return false end
+  end
+  return true
+end
+
+local function waitInterfaceClear(slotCount, forceClear)
+  slotCount = slotCount or interfaceSlotCount
+  if not forceClear and configuredSlotCount == 0 and interfaceKnownClear then return end
+
   local warned = false
   while true do
-    clearInterface()
+    if forceClear or configuredSlotCount > 0 or not interfaceIsClear(slotCount) then
+      clearInterface(forceClear and slotCount or math.max(configuredSlotCount, slotCount))
+      forceClear = false
+    end
     local started = computer.uptime()
     repeat
-      if not interfaceFluid() then return end
+      if interfaceIsClear(slotCount) then
+        interfaceKnownClear = true
+        return
+      end
       os.sleep(timing.poll)
     until computer.uptime() - started >= timing.interfaceClearTimeout
 
@@ -594,22 +667,53 @@ local function waitInterfaceClear()
     end
     setState("暂停：接口未清空", "不会把残余流体送进缓存；请检查主网容量与频道")
     os.sleep(timing.missingPatternRetry)
+    forceClear = true
   end
 end
 
-local function cacheIsEmpty()
-  local snapshot = scanCache()
-  return #snapshot.items == 0 and #snapshot.fluids == 0
-end
-
-local function returnPromptsToMain()
-  waitInterfaceClear()
-  local lastProgress = computer.uptime()
-  local lastSignature = ""
+local function waitForCycleAdvance()
+  local started = computer.uptime()
   local warned = false
 
-  while not cacheIsEmpty() do
+  while true do
     local snapshot = scanCache()
+
+    if config.mode == "quark" then
+      if buildQuarkRequests(snapshot) then
+        log("已观察到下一轮完整提示，确认上一轮已被机器取用")
+        return
+      end
+    else
+      -- MagMatter supply contains the same Time/Space fluids as its hints, so
+      -- never guess which amount is stale. Only a clean, valid next prompt is
+      -- accepted as the machine-advance signal.
+      if buildMagmatterRequests(snapshot) then
+        log("已观察到下一轮完整提示，确认上一轮已被机器取用")
+        return
+      end
+    end
+
+    local elapsed = computer.uptime() - started
+    local detail = string.format("已送入全部目标流体；等待下一轮完整提示（%.1f 秒）", elapsed)
+    if elapsed >= timing.advanceWarningAfter then
+      detail = detail .. "；请检查库存二合一输入仓网络与缓存内容"
+      if not warned then
+        log("目标流体已送入缓存，但机器尚未生成下一轮提示；继续等待，不会提前开始下一轮")
+        warned = true
+      end
+    end
+    setState("等待机器取料", detail)
+    os.sleep(timing.poll)
+  end
+end
+
+local function returnPromptsToMain(initialSnapshot)
+  waitInterfaceClear()
+  local lastProgress = computer.uptime()
+  local warned = false
+  local snapshot = initialSnapshot or scanCache()
+
+  while #snapshot.items > 0 or #snapshot.fluids > 0 do
     local before = snapshotSignature(snapshot)
 
     -- A dedicated batch-return phase: all fluids and all items go to the same main-network interface.
@@ -622,9 +726,10 @@ local function returnPromptsToMain()
         cacheSide, mainSide, item.size, item.slot)
     end
 
-    os.sleep(timing.poll)
-    local after = snapshotSignature(scanCache())
-    if after ~= before or after ~= lastSignature then
+    os.sleep(timing.returnVerifyDelay)
+    snapshot = scanCache()
+    local after = snapshotSignature(snapshot)
+    if after ~= before then
       lastProgress = computer.uptime()
       warned = false
     elseif computer.uptime() - lastProgress >= timing.returnStallTimeout then
@@ -634,7 +739,6 @@ local function returnPromptsToMain()
       os.sleep(timing.missingPatternRetry)
       lastProgress = computer.uptime()
     end
-    lastSignature = after
   end
   log("本批提示物品与流体已全部返回主网")
 end
@@ -660,110 +764,174 @@ local function jobState(job)
   return "running"
 end
 
-local function requestCraft(request)
-  while true do
-    local craftables = checkedCall("查询 AE 样板失败", craftablesFor, request)
-    if #craftables == 0 then
-      setState("缺失样板", "主网中找不到：" .. request.dropDisplayName)
-      log("缺失样板：" .. request.dropDisplayName)
-      os.sleep(timing.missingPatternRetry)
-    else
-      local craftable = craftables[1]
-      local ok, job, requestReason
-      if config.aeCpuName and config.aeCpuName ~= "" then
-        ok, job, requestReason = pcall(craftable.request, 1, true, config.aeCpuName)
-      else
-        ok, job, requestReason = pcall(craftable.request, 1, true)
-      end
-      if ok and job then
-        log("已请求：" .. request.dropDisplayName)
-        return job
-      end
-      setState("暂停：下单失败", tostring(requestReason or job or "AE 未返回 crafting handle"))
-      os.sleep(timing.missingPatternRetry)
-    end
+local function requestCraftOnce(request)
+  local craftables = checkedCall("查询 AE 样板失败", craftablesFor, request)
+  if #craftables == 0 then return nil, "missing" end
+
+  local craftable = craftables[1]
+  local ok, job, requestReason
+  if config.aeCpuName and config.aeCpuName ~= "" then
+    ok, job, requestReason = pcall(craftable.request, 1, true, config.aeCpuName)
+  else
+    ok, job, requestReason = pcall(craftable.request, 1, true)
+  end
+  if ok and job then
+    log("已请求：" .. request.dropDisplayName)
+    return job
+  end
+  return nil, "failed", requestReason or job or "AE 未返回 crafting handle"
+end
+
+local function updateBatchUI(requests, batchNumber, batchCount)
+  local missing, crafting = nil, 0
+  ui.done, ui.total, ui.current = 0, 0, 0
+  for index, request in ipairs(ui.requests) do
+    ui.done = ui.done + math.min(request.amount, request.delivered or 0)
+    ui.total = ui.total + request.amount
+    if ui.current == 0 and (request.delivered or 0) < request.amount then ui.current = index end
+    if request.status == "缺失样板" then missing = missing or request end
+    if request.status == "并行合成" then crafting = crafting + 1 end
+  end
+
+  if missing then
+    setState("缺失样板", "主网中找不到：" .. missing.dropDisplayName)
+  elseif crafting > 0 then
+    setState("并行备料", string.format("第 %d/%d 批；%d 项正在 AE 合成", batchNumber, batchCount, crafting))
+  else
+    setState("批量快速注入", string.format("第 %d/%d 批；最多 %d 种流体同时供给", batchNumber, batchCount, #requests))
   end
 end
 
-local function waitForCraftOrFluid(request, job, requestedAt)
-  local warned = false
-  while not interfaceFluid() do
-    local state, reason = jobState(job)
-    if state == "failed" or state == "canceled" then
-      log("合成失败，将重新查询样板：" .. tostring(reason or state))
-      os.sleep(timing.missingPatternRetry)
-      return false
-    end
-    if state == "done" then
-      os.sleep(timing.interfaceWarmup)
-      if interfaceFluid() then return true end
-      log("合成完成但接口仍为空，将重新请求一份")
-      return false
-    end
-    if not warned and computer.uptime() - requestedAt >= timing.craftWarningAfter then
-      warned = true
-      setState("暂停：合成耗时过长", request.dropDisplayName .. "；保留现有任务，不会取消其他 CPU")
-      log("合成超过警戒时间，继续等待且不取消 CPU")
-    end
-    os.sleep(timing.craftPoll)
+local function supplyBatch(requests, batchNumber, batchCount)
+  local configured = #requests
+  local firstCraftAt = computer.uptime() + timing.interfaceSupplyGrace
+
+  for slot, request in ipairs(requests) do
+    request.delivered = request.delivered or 0
+    request.interfaceSlot = slot - 1
+    request.status = "接口备料"
+    request.activeJob = nil
+    request.requestedAt = nil
+    request.nextCraftAt = firstCraftAt
+    request.craftWarned = false
+    request.missingLogged = false
+    checkedCall("设置二合一接口失败", devices.interface.setFluidInterfaceConfiguration,
+      request.interfaceSlot, devices.database.address, request.databaseSlot)
   end
-  return true
-end
-
-local function supplyRequest(request, index)
-  ui.current = index
-  request.delivered = request.delivered or 0
-  ui.done = request.delivered
-  ui.total = request.amount
-  render()
-
-  checkedCall("设置二合一接口失败", devices.interface.setFluidInterfaceConfiguration,
-    0, devices.database.address, request.databaseSlot)
+  configuredSlotCount = configured
+  interfaceKnownClear = false
   os.sleep(timing.interfaceWarmup)
 
-  local remaining = request.amount - request.delivered
-  local activeJob, requestedAt
-  while remaining > 0 do
-    local fluid = interfaceFluid()
-    if fluid then
-      if fluid.name ~= request.fluidName then
-        clearInterface()
-        error("二合一接口出现错误流体：期望 " .. request.fluidName .. "，实际 " .. tostring(fluid.name), 0)
-      end
-      local moveAmount = math.min(remaining, fluid.amount)
-      local ok, movedOK, moved = pcall(devices.transposer.transferFluid,
-        mainSide, cacheSide, moveAmount, 0)
-      if not ok then error("补给流体失败: " .. tostring(movedOK), 0) end
-      moved = tonumber(moved) or 0
-      if not movedOK or moved <= 0 then
-        setState("暂停：补给受阻", "缓存罐无法接收 " .. request.displayName)
-        os.sleep(timing.missingPatternRetry)
+  while true do
+    local allDone, movedThisPass = true, false
+    local now = computer.uptime()
+
+    for _, request in ipairs(requests) do
+      local remaining = request.amount - (request.delivered or 0)
+      if remaining > 0 then
+        allDone = false
+        local fluid = interfaceFluid(request.interfaceSlot)
+        if fluid then
+          if fluid.name ~= request.fluidName then
+            error("二合一接口槽 " .. request.interfaceSlot .. " 出现错误流体：期望 "
+              .. request.fluidName .. "，实际 " .. tostring(fluid.name), 0)
+          end
+
+          local moveAmount = math.min(remaining, fluid.amount)
+          local ok, movedOK, moved = pcall(devices.transposer.transferFluid,
+            mainSide, cacheSide, moveAmount, request.interfaceSlot)
+          if not ok then error("补给流体失败：" .. tostring(movedOK), 0) end
+          moved = tonumber(moved) or 0
+          if movedOK and moved > 0 then
+            request.delivered = request.delivered + moved
+            request.status = request.delivered >= request.amount and "已送入" or "快速注入"
+            request.missingLogged = false
+            movedThisPass = true
+            if request.activeJob then
+              local state = jobState(request.activeJob)
+              if state ~= "running" then request.activeJob = nil end
+            end
+          else
+            request.status = "输入受阻"
+          end
+        elseif request.activeJob then
+          local state, reason = jobState(request.activeJob)
+          if state == "failed" or state == "canceled" then
+            log("合成失败，将重新查询 " .. request.dropDisplayName .. "：" .. tostring(reason or state))
+            request.activeJob = nil
+            request.nextCraftAt = now + timing.missingPatternRetry
+            request.status = "等待重试"
+          elseif state == "done" then
+            request.activeJob = nil
+            request.nextCraftAt = now + timing.interfaceSupplyGrace
+            request.status = "等待接口"
+          else
+            request.status = "并行合成"
+            if not request.craftWarned and now - request.requestedAt >= timing.craftWarningAfter then
+              request.craftWarned = true
+              log(request.dropDisplayName .. " 合成超过警戒时间；继续等待且不取消 CPU")
+            end
+          end
+        elseif now >= request.nextCraftAt then
+          local job, state, reason = requestCraftOnce(request)
+          if job then
+            request.activeJob = job
+            request.requestedAt = now
+            request.craftWarned = false
+            request.status = "并行合成"
+          elseif state == "missing" then
+            request.status = "缺失样板"
+            if not request.missingLogged then
+              log("缺失样板：" .. request.dropDisplayName)
+              request.missingLogged = true
+            end
+            request.nextCraftAt = now + timing.missingPatternRetry
+          else
+            request.status = "下单失败"
+            log("下单失败：" .. request.dropDisplayName .. "；" .. tostring(reason))
+            request.nextCraftAt = now + timing.missingPatternRetry
+          end
+        else
+          request.status = "等待主网"
+        end
       else
-        remaining = remaining - moved
-        request.delivered = request.amount - remaining
-        ui.done = request.delivered
-        setState("补给中", request.displayName .. "  " .. ui.done .. " / " .. request.amount .. " mB")
-      end
-      if activeJob then
-        local state = jobState(activeJob)
-        if state ~= "running" then activeJob = nil end
-      end
-    else
-      if not activeJob then
-        setState("等待 AE", "主网供给不足，准备请求 " .. request.dropDisplayName)
-        activeJob = requestCraft(request)
-        requestedAt = computer.uptime()
-      end
-      if not waitForCraftOrFluid(request, activeJob, requestedAt) then
-        activeJob = nil
+        request.status = "已送入"
       end
     end
-    os.sleep(timing.poll)
+
+    updateBatchUI(requests, batchNumber, batchCount)
+    if allDone then break end
+    os.sleep(movedThisPass and timing.transferYield or timing.craftPoll)
   end
 
-  clearInterface()
-  waitInterfaceClear()
-  log("已送入 " .. request.amount .. " mB " .. request.displayName)
+  waitInterfaceClear(configured)
+  log(string.format("第 %d/%d 批快速注入完成（%d 种流体）", batchNumber, batchCount, configured))
+end
+
+local function pendingRequests(requests)
+  local pending = {}
+  for _, request in ipairs(requests) do
+    if (request.delivered or 0) < request.amount then
+      table.insert(pending, request)
+    end
+  end
+  return pending
+end
+
+local function supplyAllRequests(requests)
+  local pending = pendingRequests(requests)
+  if #pending == 0 then return end
+  local batchCount = math.ceil(#pending / interfaceSlotCount)
+  waitInterfaceClear(interfaceSlotCount)
+
+  for first = 1, #pending, interfaceSlotCount do
+    local batch = {}
+    for index = first, math.min(#pending, first + interfaceSlotCount - 1) do
+      table.insert(batch, pending[index])
+    end
+    local batchNumber = math.floor((first - 1) / interfaceSlotCount) + 1
+    supplyBatch(batch, batchNumber, batchCount)
+  end
 end
 
 local function processCycle(cycle)
@@ -772,29 +940,36 @@ local function processCycle(cycle)
   ui.current = 0
   ui.done = 0
   ui.total = 0
+  for _, request in ipairs(cycle.requests) do request.status = request.status or "等待" end
+  if not cycle.ignoredLogged then
+    for _, ignored in ipairs(cycle.requests.ignored or {}) do
+      log(string.format("已忽略神锻假输入：%d mB %s（铁/铜提示不会形成实际输入）",
+        ignored.amount, ignored.displayName))
+    end
+    cycle.ignoredLogged = true
+  end
   if not cycle.promptsReturned then
     setState("整批返主网", "提示物品和提示流体将统一进入主 AE 网络")
-    returnPromptsToMain()
+    local initialSnapshot = cycle.promptSnapshot
+    cycle.promptSnapshot = nil
+    returnPromptsToMain(initialSnapshot)
     cycle.promptsReturned = true
   end
 
-  for index, request in ipairs(cycle.requests) do
-    if (request.delivered or 0) < request.amount then
-      supplyRequest(request, index)
-    else
-      ui.current = index + 1
-    end
-  end
+  supplyAllRequests(cycle.requests)
   ui.current = #cycle.requests + 1
   ui.done = ui.total
-  setState("本批完成", "全部目标流体已送入缓存；等待机器取走")
+  for _, request in ipairs(cycle.requests) do request.status = "等待取料" end
+  waitForCycleAdvance()
+  for _, request in ipairs(cycle.requests) do request.status = "已取用" end
+  setState("本批完成", "已观察到下一轮完整提示；上一轮已确认取用")
   log("周期 " .. ui.cycle .. " 完成")
   os.sleep(timing.cycleSettle)
 end
 
 local function main()
   setupComponents()
-  clearInterface()
+  waitInterfaceClear(interfaceSlotCount, true)
   setState("自检完成", "正在等待机器生成提示")
 
   local stableSignature, stableCount = nil, 0
@@ -829,7 +1004,7 @@ local function main()
           os.sleep(timing.poll)
         else
           ui.cycle = ui.cycle + 1
-          local cycle = {requests = requests, promptsReturned = false}
+          local cycle = {requests = requests, promptsReturned = false, promptSnapshot = snapshot}
           local cycleFinished = false
           while not cycleFinished do
             local ok, cycleError = pcall(processCycle, cycle)
@@ -838,7 +1013,7 @@ local function main()
             else
               log("周期故障：" .. tostring(cycleError))
               setState("故障暂停", "保留本批进度，修复后自动重试：" .. tostring(cycleError))
-              pcall(clearInterface)
+              pcall(clearInterface, interfaceSlotCount)
               os.sleep(timing.missingPatternRetry)
             end
           end
@@ -855,7 +1030,7 @@ local function errorTrace(message)
 end
 
 local ok, fatal = xpcall(main, errorTrace)
-if devices.interface then pcall(clearInterface) end
+if devices.interface then pcall(clearInterface, interfaceSlotCount) end
 if gpu then
   gpu.setBackground(0x000000)
   gpu.setForeground(0xFFFFFF)

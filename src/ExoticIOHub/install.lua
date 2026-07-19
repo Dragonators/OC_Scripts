@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "exotic-iohub-v9"
+local releaseTag = "exotic-iohub-v10"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
   .. releaseTag .. "/src/ExoticIOHub/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -175,6 +175,35 @@ local function validateConfig(path, expectedMode)
   end
 end
 
+-- v9 preserved user component addresses, but its default 1-2 second polling
+-- values also kept the long gap between a completed cycle and prompt return.
+-- Migrate only an unmarked v9-style timing block; custom non-default values
+-- remain untouched.
+local function migratePreservedConfig(path)
+  local content = readAll(path)
+  if content:find("returnVerifyDelay%s*=") then return false end
+
+  local function replaceDefault(pattern, replacement)
+    content = content:gsub(pattern, function(prefix, suffix)
+      return prefix .. replacement .. suffix
+    end, 1)
+  end
+
+  replaceDefault("(\n%s*poll%s*=%s*)1(%s*,)", "0.25")
+  replaceDefault("(\n%s*craftPoll%s*=%s*)1(%s*,)", "0.25")
+  replaceDefault("(\n%s*cycleSettle%s*=%s*)2(%s*,)", "0.25")
+
+  local indent = content:match("\n([ \t]*)cycleSettle%s*=")
+  if not indent then return false end
+  local additions = "\n" .. indent .. "interfaceSupplyGrace = 2,"
+    .. "\n" .. indent .. "transferYield = 0.05,"
+    .. "\n" .. indent .. "returnVerifyDelay = 0.1,"
+    .. "\n" .. indent .. "advanceWarningAfter = 30,"
+  content = content:gsub("(\n[ \t]*cycleSettle%s*=)", additions .. "%1", 1)
+  writeChecked(path, content)
+  return true
+end
+
 local function validateStage()
   for _, spec in ipairs(files) do
     local path = filesystem.concat(stageRoot, spec.target)
@@ -259,7 +288,11 @@ local function stageFiles()
     if spec.preserve and filesystem.exists(currentPath) then
       io.write("保留现有 " .. spec.target .. " … ")
       copyChecked(currentPath, stagedPath)
-      print("完成")
+      if spec.configMode and migratePreservedConfig(stagedPath) then
+        print("完成（已升级 v9 默认时序）")
+      else
+        print("完成")
+      end
     elseif spec.generated then
       io.write("生成 " .. spec.target .. " … ")
       writeChecked(stagedPath, spec.generated())
@@ -292,6 +325,8 @@ local function main()
   print("运行：")
   print("  quark")
   print("  magmatter")
+  print("升级前若曾残留铁/铜等离子体，请先手动从缓存输入仓返网一次。")
+  print("新版会从请求源头忽略铁/铜假输入，不会自动搬运旧残留。")
   print("旧 exotic_* 文件不会自动删除；确认新版稳定后可自行清理。")
 end
 
