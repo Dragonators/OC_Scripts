@@ -86,7 +86,8 @@ OC 服务器/线缆   ────────────┘                   
 共享模块按 OpenOS 的真实语义检查回调：`component.methods()` 返回的 `false`
 表示回调存在但不是 direct，只有返回 `nil` 才表示回调缺失。组件代理中的回调
 可以是带 `__call` 的可调用表，因此脚本不使用 `type(method) == "function"` 判断
-回调是否存在。
+回调是否存在。数值回调也会先捕获第一个返回值再交给 `tonumber`，防止额外的
+状态字符串被 Lua 误当成 `tonumber` 的进制参数。
 
 ## GUI 与恢复
 

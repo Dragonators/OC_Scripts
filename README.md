@@ -22,7 +22,7 @@ OpenOS `/home`. Existing `exotic_quark.cfg` and `exotic_magmatter.cfg` files are
 preserved.
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v4/src/ExoticIOHub/install.lua /tmp/exotic-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v5/src/ExoticIOHub/install.lua /tmp/exotic-install.lua
 lua /tmp/exotic-install.lua /home
 ```
 

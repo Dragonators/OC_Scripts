@@ -353,6 +353,14 @@ local function valueCall(proxy, method, ...)
   return unpack(result.values, 1, result.n)
 end
 
+local function numberCall(proxy, method, ...)
+  local value = valueCall(proxy, method, ...)
+  if value == nil then return nil end
+  local number = tonumber(value)
+  if number == nil then error(method .. " 返回非数字: " .. tostring(value)) end
+  return number
+end
+
 local function componentAddress(kind, prefix)
   if prefix and prefix ~= "" then
     local ok, address = pcall(component.get, prefix, kind)
@@ -507,8 +515,8 @@ function M.run(profile, configPath)
   end
 
   local function machineData()
-    local progress = tonumber(valueCall(devices.machine, "getWorkProgress")) or 0
-    local maximum = tonumber(valueCall(devices.machine, "getWorkMaxProgress")) or 0
+    local progress = numberCall(devices.machine, "getWorkProgress") or 0
+    local maximum = numberCall(devices.machine, "getWorkMaxProgress") or 0
     local active = valueCall(devices.machine, "isMachineActive") == true
     state.machine = { progress = progress, maximum = maximum, active = active }
     return state.machine
@@ -673,10 +681,10 @@ function M.run(profile, configPath)
       error("物品槽 " .. hint.slot .. " 已被未知物品替换，拒绝回送")
     end
     valueCall(devices.iohub, "select", hint.slot)
-    local before = tonumber(valueCall(devices.iohub, "count", hint.slot)) or 0
+    local before = numberCall(devices.iohub, "count", hint.slot) or 0
     if before <= 0 then return end
-    local sent = tonumber(valueCall(devices.iohub, "sendItems", before)) or 0
-    local after = tonumber(valueCall(devices.iohub, "count", hint.slot)) or 0
+    local sent = numberCall(devices.iohub, "sendItems", before) or 0
+    local after = numberCall(devices.iohub, "count", hint.slot) or 0
     if sent ~= before or after ~= 0 then
       error(string.format("物品槽 %d 回送 AE 不完整: %d/%d，剩余 %d", hint.slot, sent, before, after))
     end
@@ -688,10 +696,10 @@ function M.run(profile, configPath)
       error("流体槽 " .. hint.slot .. " 已被未知流体替换，拒绝回送")
     end
     valueCall(devices.iohub, "selectTank", hint.slot)
-    local before = tonumber(valueCall(devices.iohub, "tankLevel", hint.slot)) or 0
+    local before = numberCall(devices.iohub, "tankLevel", hint.slot) or 0
     if before <= 0 then return end
-    local sent = tonumber(valueCall(devices.iohub, "sendFluids", before)) or 0
-    local after = tonumber(valueCall(devices.iohub, "tankLevel", hint.slot)) or 0
+    local sent = numberCall(devices.iohub, "sendFluids", before) or 0
+    local after = numberCall(devices.iohub, "tankLevel", hint.slot) or 0
     if sent ~= before or after ~= 0 then
       error(string.format("流体槽 %d 回送 AE 不完整: %d/%d，剩余 %d", hint.slot, sent, before, after))
     end

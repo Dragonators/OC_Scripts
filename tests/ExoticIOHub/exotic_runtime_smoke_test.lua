@@ -103,22 +103,22 @@ function iohub.getFluidInInternalTank(tank)
   return scenario.fluids[tank]
 end
 function iohub.select(slot) iohub.selectedItem = slot; return slot end
-function iohub.count(slot) return scenario.items[slot] and scenario.items[slot].size or 0 end
+function iohub.count(slot) return scenario.items[slot] and scenario.items[slot].size or 0, "items" end
 function iohub.sendItems(count)
   local item = scenario.items[iohub.selectedItem]
   if not item or item.size ~= count then return 0 end
   scenario.items[iohub.selectedItem] = nil
   scenario.sentItems = scenario.sentItems + count
-  return count
+  return count, "items"
 end
 function iohub.selectTank(tank) iohub.selectedTank = tank; return tank end
-function iohub.tankLevel(tank) return scenario.fluids[tank] and scenario.fluids[tank].amount or 0 end
+function iohub.tankLevel(tank) return scenario.fluids[tank] and scenario.fluids[tank].amount or 0, "L" end
 function iohub.sendFluids(amount)
   local fluid = scenario.fluids[iohub.selectedTank]
   if not fluid or fluid.amount ~= amount then return 0 end
   scenario.fluids[iohub.selectedTank] = nil
   scenario.sentFluids = scenario.sentFluids + amount
-  return amount
+  return amount, "L"
 end
 function iohub.getFluidsInNetwork()
   if scenario.aeDisconnected then error("AE network disconnected") end
@@ -190,8 +190,8 @@ function dual.refund()
 end
 
 local machine = {}
-function machine.getWorkProgress() return scenario.machineTicks > 0 and 100 or 0 end
-function machine.getWorkMaxProgress() return scenario.machineTicks > 0 and 200 or 0 end
+function machine.getWorkProgress() return scenario.machineTicks > 0 and 100 or 0, "ticks" end
+function machine.getWorkMaxProgress() return scenario.machineTicks > 0 and 200 or 0, "ticks" end
 function machine.isMachineActive() return scenario.machineTicks > 0 end
 
 local gpu = { width = 80, height = 25 }
