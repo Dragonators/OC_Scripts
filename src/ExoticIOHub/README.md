@@ -1,154 +1,156 @@
-# 磁物质与简并夸克胶子等离子体：IO 枢纽完整替换方案
+# 磁物质与简并夸克胶子等离子体：IO Hub + 九重输入仓方案
 
 适用版本：GTNH 2.8.4、Programmable Hatches `0.1.3p57`、OpenComputers
-`1.11.20-GTNH`。两个入口脚本互相独立，但共用同一套控制模块。
+`1.11.20-GTNH`。磁物质和简并夸克胶子仍使用两个独立入口，共用控制模块。
 
-## 文件与安装
+## 文件、配置与运行
 
-把以下公共文件放在 OpenOS 的 `/home/`：
+安装器会把全部文件放入 OpenOS 的 `/home/`，配置也默认从 `/home/` 读取：
 
-- `exotic_iohub_common.lua`
-- `exotic_zh_cn.lua`
+- `exotic_iohub_common.lua`：共享状态机与 GUI。
+- `exotic_zh_cn.lua`：游戏中文流体名表。
+- `exotic_quark_iohub.lua`、`exotic_magmatter_iohub.lua`：完整入口。
+- `quark.lua`、`magmatter.lua`：最短命令入口。
+- `exotic_quark.cfg`、`exotic_magmatter.cfg`：配置。
 
-把两个入口也放在 `/home/`：
-
-- `exotic_quark_iohub.lua`：简并夸克胶子等离子体
-- `exotic_magmatter_iohub.lua`：磁物质
-- `quark.lua`、`magmatter.lua`：使用 `/home` 配置的短命令入口
-
-把对应的 `*.example.cfg` 复制为 `/home/exotic_quark.cfg` 或
-`/home/exotic_magmatter.cfg`，再填写组件地址。运行：
+配置完成后直接运行：
 
 ```sh
 quark
 magmatter
 ```
 
-地址必须来自 `components -l`。一个网络中存在多个同类组件时不可留空。
+地址必须来自 `components -l`。一个 OC 网络中存在多个同类组件时不要把地址留空。
 
 ## 硬件拓扑
 
 ```text
 机器物品输出总线 ──物品管道──┐
-机器流体输出仓   ──流体管道──┼──> [ IO Hub ] >──正面对正──< [ OC 二合一输入枢纽 ]
-主网 AE 线       ────────────┤                                    │
-OC 服务器/线缆   ────────────┘                                    └─机器结构输入位
+机器流体输出仓   ──流体管道──┼──> [ IO Hub ] ──紧贴──> [ 九重输入仓 ] ──机器结构输入位
+主网 AE 线       ────────────┤
+OC 服务器/线缆   ────────────┘
 ```
 
-- IO Hub 和 OC 二合一输入枢纽都需要 AE 频道，共预留两个频道。
-- 两个枢纽正面相对；此连接同时承担 AE 与 OC 网络连接。
-- 普通 OC 线缆只会让 `dualhatch` 组件在 OC 中可见，不会连接它内部的 AE 代理；若
-  正面没有直接贴住 IO Hub，`submitTask()` 会返回 `me network disconnected`，且
-  二合一输入枢纽中不会出现任何流体。
-- 输出管道直接把提示物送入 IO Hub 自带的 32 个物品槽和 8 个流体槽。
-- 同一输出仓随后产生的熔融磁物质或简并夸克胶子等离子体会被识别为成品并送回主网，
-  不会被当作下一轮提示物。
-- 所有粉末和流体提示物都由 IO Hub 的 `sendItems` / `sendFluids` 完整送回 AE 主网。
-- 二合一输入枢纽是该模块唯一的配方输入；不要再安装进阶存储输入仓。
-- 不需要物质聚合器、转运器、主网 ME 接口、合成监控器或大型原料缓存仓。
+- 九重输入仓必须直接贴在 IO Hub 的一个面上；`inputHatchSide` 是“从 IO Hub 看向九重仓”的方向。
+- 九重输入仓是普通 GT 流体输入仓，不需要 OC 线缆或 AE 频道。
+- IO Hub 同时连接主网 AE 和 OC 网络，占一个 AE 频道。
+- 输出管道把提示物和最终产物送入 IO Hub 自带的 32 个物品槽、8 个流体槽。
+- 不再使用 `DualInputHachOC`、进阶存储输入仓、物质聚合器、转运器、主网 ME 接口、
+  合成监控器或外部大型缓存。
 
-此版本明确选择回收诸神之锻炉生成的提示物：简并夸克胶子模式会把随机粉末和
-流体留在主网；磁物质模式会额外留下粉末。它们是实际物品/流体，因此会形成净
-材料收益。本方案按使用者选择保留该行为，不再执行销毁。
+示例方向配置：
 
-回送阶段会在同一轮状态机步骤中扫描并回送当前全部已识别物品槽和流体槽，不再
-每个槽位等待一次 `pollInterval`。如果机器输出端随后又推入同一批提示物，脚本会
-继续整轮清空并累计数量；只有 IO Hub 整体连续空闲 `recycleQuietSamples` 次后才会
-计算最终需求。这个静默窗口针对整个 IO Hub，而不是每个槽位。
+```lua
+local sides = require("sides")
+return {
+  ioHubAddress = "98b2668d",
+  inputHatchSide = sides.east,
+  databaseAddress = "c97bd88e",
+  gtMachineAddress = "2c8acdee"
+}
+```
 
-## AE 样板
+脚本会确认指定方向恰好暴露 9 个流体槽；如果方向错误、没有贴住九重仓或贴到其他
+流体容器，会在自检阶段给出中文错误。
 
-主网必须能合成每一种可能需要的 `ae2fc:fluid_drop` 等离子体液滴。脚本先按
-液滴的服务器 `name + label` 查找样板，再反复请求一份加工样板，直至网络库存
-达到本轮的精确需求。因此建议每份等离子体加工样板输出较大的整批流体。
+## 工作流程
 
-建议建立并命名专用 CPU `Exotic Plasma`。脚本会等待该 CPU 空闲，超时时也只会
-取消这个明确命名的 CPU；配置为空时不会取消可能属于其他生产线的 CPU。
+状态机为：
 
-脚本不会把 AE2FC 液滴直接交给二合一输入枢纽。液滴只用于查找样板；实际提交
-使用动态生成的 `IC2:itemFluidCell` NBT 引用。所有需求通过 `addTask` 排队后由
-`submitTask()` 在同一 tick 送进同一个双输入库存。
+```text
+自检 → 等待样板 → 回送样板 → 补充合成 → 库存复核
+     → 逐种注入九重仓 → 等待开机 → 等待完成
+```
 
-当前 p57 的 `addTask` 数据库索引在 Java 侧直接传给 `getStackInSlot`，因此是
-0-based；共享模块已经把 OpenOS 数据库的 1-based 配置槽位减一，配置文件仍按
-玩家看到的 1-based 槽位填写。
+提示物全部返回 AE 主网，不再销毁。IO Hub 清空提示物时会在一个状态机步骤中处理
+当前全部槽位；随后只等待一次 `recycleQuietSeconds`，到期才重扫整个 IO Hub。
+它不会再为了“静默 N 次”重复扫描 32+8 个槽位，因此检测与回送间隔明显缩短。
 
-## 两种模式的差异
+默认快速参数：
 
-简并夸克胶子模式要求 IO Hub 中稳定出现总计 7 种提示物：
+```lua
+pollInterval = 0.2
+craftPollInterval = 0.5
+stableSamples = 1
+recycleQuietSeconds = 1
+```
 
-- 流体提示：对应等离子体数量为提示量 × 1000 L。
-- 粉末提示：对应等离子体数量为物品数 × 1296 L。
-- 解析成功后，7 种提示物全部送回 AE 主网。
+如果机器输出提示物跨越较长时间，可以把 `recycleQuietSeconds` 调到 `2` 或 `3`；
+这只增加整批提示物的收集窗口，不会给每个格子单独加延迟。
 
-磁物质模式只接受一个粉末、富快子时间流体和扩大化空间流体：
+## AE 合成与九重仓注入
 
-- 等离子体数量为 `(空间流体量 - 时间流体量) × 144 L`。
-- 粉末、时间流体和空间流体全部完整送回主网。
-- 时间和空间流体随后与等离子体同批提交到双输入库存；粉末保留在主网。
+主网必须能合成所有可能出现的等离子体。脚本用 AE2FC 流体液滴的 `name + label`
+寻找加工样板；真正取流体时，数据库槽位会生成带
+`{Fluid:{FluidName,Amount=1000}}` NBT 的 `IC2:itemFluidCell` 描述。
 
-粉末解析顺序为：运行环境提供的矿辞、BartWorks 元数据表、GT++ 物品名、GT
-等离子单元元数据探针。该顺序兼容当前 OpenComputers 默认关闭
-`insertIdsInConverters` 的配置。
+每一种流体依次执行：
 
-共享模块按 OpenOS 的真实语义检查回调：`component.methods()` 返回的 `false`
-表示回调存在但不是 direct，只有返回 `nil` 才表示回调缺失。组件代理中的回调
-可以是带 `__call` 的可调用表，因此脚本不使用 `type(method) == "function"` 判断
-回调是否存在。数值回调也会先捕获第一个返回值再交给 `tonumber`，防止额外的
-状态字符串被 Lua 误当成 `tonumber` 的进制参数。
+1. `requestFluids(database, slot, amount)` 从 AE 精确提取到 IO Hub 当前内部流体槽。
+2. `fillRobot(inputHatchSide, amount)` 直接注入相邻九重输入仓。
+3. 核对返回的实际传输量；容量不足或只传入一部分都会停止后续注入。
 
-## GUI 与恢复
+脚本不调用 `setWorkAllowed`。机器在逐种注入过程中保持原有工作状态，九重输入仓
+满足完整配方后由 GT 机器自行识别并启动。注入完成但机器尚未消费时，脚本会按
+流体名和数量复核九重仓；机器已经开始并清空输入仓时则直接进入等待完成阶段。
 
-GUI 最低需要 80×25，推荐 120×35。缺失样板使用当前整合包
-`fluid.plasma.*` 中文语言键和 AE2FC 的 `%s液滴` 格式显示。
+## 两种模式
 
-- `Space`：暂停/继续状态机；不会中断已经开始的 GT 配方。
-- `R`：在故障或等待启动状态尝试安全退款，再根据周期日志恢复。
-- `Q` / `Esc`：退出并保留周期日志，不会擅自清空枢纽。
+简并夸克胶子模式要求总计 7 种提示物：
 
-脚本把未完成周期写入配置的 `journalPath`。重启后：
+- 流体提示转换为对应等离子体，需求为提示量 × 1000 L。
+- 粉末提示转换为对应等离子体，需求为物品数 × 1296 L。
+- 全部提示物回到 AE，最多 7 种等离子体逐种进入九重仓。
 
-- 机器正在运行时继续等待完成。
-- 原料已提交但机器未开始时继续等待，不重复提交。
-- 提示物尚完整时继续处理。
-- 提示物已处理且双输入为空时从库存补充阶段继续。
-- 日志、IO Hub 和机器状态不一致时进入故障锁定，不会回送未知物品。
+磁物质模式只接受一个粉末、时间流体和空间流体：
 
-如果 `submitTask()` 返回任何非 `executed` 状态，脚本立即调用 `refund()`；退款
-不能完全返回主网时保持故障现场，必须人工检查 AE 容量、频道和安全终端权限。
+- 等离子体需求为 `(空间流体量 - 时间流体量) × 144 L`。
+- 粉末、时间流体和空间流体先全部回到 AE。
+- 时间流体、空间流体和目标等离子体再逐种进入同一个九重输入仓。
+
+粉末解析兼容 GregTech、GT++、BartWorks/Lanth，并优先使用运行环境返回的矿辞。
+缺失样板名称优先使用中文翻译表，其次使用服务器中文 `label`，最后回退到内部流体名。
+
+## 故障与恢复
+
+- 启动时九重仓存在但没有本脚本周期日志：锁定故障，不自动覆盖或抽走。
+- 注入中断且机器尚未启动：脚本只回收本轮已知流体。它先清空 IO Hub 本轮残留，
+  再用 `drainRobot` 从九重仓抽回并通过 `sendFluids` 返回 AE。
+- 九重仓出现本轮需求之外的流体：拒绝自动回收，保留现场。
+- 机器启动超时：尝试把九重仓中的本轮原料完整回送 AE；回送失败时保持故障锁定。
+- 机器已经启动：不抽取、不打断，只等待完成。
+
+快捷键：
+
+- `Space`：暂停/继续状态机，不改变机器工作许可。
+- `R`：安全恢复并尝试回送本轮已知残留。
+- `Q` / `Esc`：退出并保留周期日志。
 
 ## 上机自检
-
-先在 OpenOS 中确认实际 API：
 
 ```lua
 local component = require("component")
 local io = component.proxy(component.list("iohub", true)())
-local dual = component.proxy(component.list("dualhatch", true)())
-for name in pairs(component.methods(io.address)) do print("iohub", name) end
-for name in pairs(component.methods(dual.address)) do print("dualhatch", name) end
+for name in pairs(component.methods(io.address)) do print(name) end
 ```
 
-首次运行前确认：IO Hub 只含本机刚输出的提示物，二合一输入枢纽为空，数据库
-至少有 9 个槽位，AE 物品与流体存储均有接收空间，两个 AE 设备均在线且专用
-CPU 可见。
+至少应看到：`requestFluids`、`sendFluids`、`fillRobot`、`drainRobot`、
+`getTankCount`、`getTankLevel`、`getTankCapacity`、`getFluidInTank`。
 
-数据库的 Java `size()` 是内部接口，并不是 Lua 回调。脚本通过
-`computer.getDeviceInfo()[数据库地址].capacity` 检查实际容量，不会要求数据库
-组件暴露不存在的 `size` 回调。
+首次投产前确认：
+
+- `inputHatchSide` 指向紧贴 IO Hub 的九重输入仓。
+- 九重仓为空，且单槽容量大于本轮最大单种流体需求。
+- 数据库至少有 9 个槽位。
+- AE 流体存储有足够库存和回收空间。
+- 两种模式各完成一轮，核对九重仓在开机前装满、开机后清空，AE 账目无复制或吞料。
 
 ## 离线测试
 
-仓库测试使用 Lua 5.2 兼容的 Fengari 运行：
-
 ```powershell
-npx -y --package fengari-node-cli fengari scripts/opencomputers/tests/exotic_iohub_common_test.lua
-npx -y --package fengari-node-cli fengari scripts/opencomputers/tests/exotic_runtime_smoke_test.lua
+npx -y --package fengari-node-cli fengari tests/ExoticIOHub/exotic_iohub_common_test.lua
+npx -y --package fengari-node-cli fengari tests/ExoticIOHub/exotic_runtime_smoke_test.lua
 ```
 
-核心测试覆盖 GT、GT++、BartWorks 映射、三种换算、中文宽度与回退、任务结果
-校验；运行时模拟使用真实的“可调用回调表”和 direct 布尔值，覆盖两个完整周期，
-以及错误脚本、脏启动、缺失样板、CPU 忙碌、
-合成失败/取消/超时/产量不足、AE 或组件断线、部分提交、退款失败和机器超时。
-模拟测试不能替代最终上机验收；正式投产前仍应各跑一轮，并核对双输入库存与 AE
-流体账目。
+模拟测试覆盖两种完整配方、×1000/×1296/×144 换算、延迟提示物累计、九重仓脏启动、
+AE 提取失败、部分注入、自动回送失败、启动超时、运行超时、中文 GUI 和 80×25/120×35。

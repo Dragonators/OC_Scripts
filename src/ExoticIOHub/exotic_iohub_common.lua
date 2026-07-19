@@ -25,21 +25,21 @@ local bartMaterials = {
 
 local defaults = {
   ioHubAddress = nil,
-  dualHatchAddress = nil,
+  inputHatchSide = nil,
   databaseAddress = nil,
   gtMachineAddress = nil,
   gpuAddress = nil,
   screenAddress = nil,
   cpuName = "",
-  pollInterval = 0.5,
-  craftPollInterval = 2,
+  pollInterval = 0.2,
+  craftPollInterval = 0.5,
   craftTimeout = 600,
   dispatchTimeout = 30,
   recipeTimeout = 900,
   partialHintTimeout = 30,
   maxCraftAttempts = 6,
-  stableSamples = 2,
-  recycleQuietSamples = 6,
+  stableSamples = 1,
+  recycleQuietSeconds = 1,
   screenWidth = 120,
   screenHeight = 35,
   logLines = 6,
@@ -278,61 +278,6 @@ local function snapshotSignature(snapshot)
   return table.concat(parts, "|")
 end
 
-local function allTasksExecuted(states, expected)
-  if type(states) ~= "table" or #states ~= expected then return false end
-  for _, task in ipairs(states) do
-    if type(task) ~= "table" or task.state ~= "executed" then return false end
-  end
-  return true
-end
-
-local taskStateZh = {
-  ["added"] = "已加入但未提交",
-  ["ready to submit"] = "已就绪但未执行",
-  ["data base missing"] = "数据库不可见",
-  ["item invalid"] = "数据库槽位无效",
-  ["item is not fluid container"] = "数据库物品不是有效流体容器",
-  ["cancelled"] = "已取消",
-  ["executed"] = "已执行",
-  ["me storage not sufficient"] = "AE 精确流体库存不足",
-  ["me network disconnected"] = "二合一输入枢纽的 AE 网络未连接",
-  ["partially executed"] = "部分执行"
-}
-
-local function taskStatesSummary(states, expected)
-  if type(states) ~= "table" then return false, "submitTask 未返回任务列表" end
-  local details, executed = {}, #states == expected
-  if #states ~= expected then
-    details[#details + 1] = string.format("返回 %d/%d 项", #states, expected)
-  end
-  for index = 1, math.max(#states, expected) do
-    local task = states[index]
-    if type(task) ~= "table" then
-      executed = false
-      details[#details + 1] = string.format("#%d 无返回", index)
-    else
-      local raw = tostring(task.state or "error")
-      if raw ~= "executed" then executed = false end
-      details[#details + 1] = string.format("#%s %s", tostring(task.id or index), taskStateZh[raw] or raw)
-    end
-  end
-  return executed, table.concat(details, "；")
-end
-
-local function taskFailureAdvice(states)
-  if type(states) ~= "table" then return "" end
-  for _, task in ipairs(states) do
-    if type(task) == "table" and task.state == "me network disconnected" then
-      return "；OC 可见不等于 AE 已连接，请把二合一输入枢纽正面直接贴住 IO Hub"
-    end
-  end
-  return ""
-end
-
-local function dualDatabaseIndex(luaSlot)
-  return assert(tonumber(luaSlot), "database slot required") - 1
-end
-
 M._test = {
   resolveDustPlasma = resolveDustPlasma,
   buildQuarkRequirements = buildQuarkRequirements,
@@ -340,10 +285,7 @@ M._test = {
   fluidDropNbt = fluidDropNbt,
   universalCellNbt = universalCellNbt,
   dropletNameZh = dropletNameZh,
-  snapshotSignature = snapshotSignature,
-  allTasksExecuted = allTasksExecuted,
-  taskStatesSummary = taskStatesSummary,
-  dualDatabaseIndex = dualDatabaseIndex
+  snapshotSignature = snapshotSignature
 }
 
 local function loadConfig(path)
@@ -444,7 +386,7 @@ function M.run(profile, configPath)
     stableCount = 0,
     partialSince = nil,
     recycleIndex = 1,
-    recycleQuietCount = 0,
+    recycleQuietUntil = nil,
     recycleTotals = nil,
     ensureIndex = 1,
     craft = nil,
@@ -485,7 +427,7 @@ function M.run(profile, configPath)
       stage = stage,
       savedAt = computer.uptime(),
       recycleIndex = state.recycleIndex,
-      recycleQuietCount = state.recycleQuietCount,
+      recycleQuietUntil = state.recycleQuietUntil,
       recycleTotals = state.recycleTotals,
       hints = state.hints,
       requirements = state.requirements
@@ -559,10 +501,6 @@ function M.run(profile, configPath)
     return #snapshot.items == 0 and #snapshot.fluids == 0
   end
 
-  local function dualEmpty()
-    return valueCall(devices.dual, "isEmpty") == true
-  end
-
   local function machineData()
     local progress = numberCall(devices.machine, "getWorkProgress") or 0
     local maximum = numberCall(devices.machine, "getWorkMaxProgress") or 0
@@ -582,6 +520,56 @@ function M.run(profile, configPath)
     return result
   end
 
+  local function inputHatchSnapshot()
+    local count = numberCall(devices.iohub, "getTankCount", config.inputHatchSide)
+    if not count or count < 1 then error("IO Hub 指定方向没有可用流体仓") end
+    if count ~= 9 then
+      error("IO Hub 指定方向不是九重输入仓: 检测到 " .. tostring(count) .. " 个流体槽")
+    end
+    local snapshot = { count = count, tanks = {}, byName = {}, total = 0 }
+    for tank = 1, count do
+      local level = numberCall(devices.iohub, "getTankLevel", config.inputHatchSide, tank) or 0
+      if level > 0 then
+        local fluid = valueCall(devices.iohub, "getFluidInTank", config.inputHatchSide, tank)
+        if type(fluid) ~= "table" or not fluid.name then
+          error("无法读取九重输入仓第 " .. tank .. " 槽流体")
+        end
+        local entry = { slot = tank, name = fluid.name, amount = level, label = fluid.label }
+        snapshot.tanks[#snapshot.tanks + 1] = entry
+        snapshot.byName[entry.name] = (snapshot.byName[entry.name] or 0) + level
+        snapshot.total = snapshot.total + level
+      end
+    end
+    return snapshot
+  end
+
+  local function inputHatchEmpty()
+    return inputHatchSnapshot().total == 0
+  end
+
+  local function requirementNames()
+    local allowed = {}
+    for _, requirement in ipairs(state.requirements) do allowed[requirement.name] = true end
+    return allowed
+  end
+
+  local function transferResult(result, method)
+    if not result.ok then error(method .. " 调用失败: " .. tostring(result.error)) end
+    local moved = tonumber(result.values[2]) or 0
+    if result.values[1] ~= true or moved <= 0 then
+      error(method .. " 未传输流体: " .. tostring(result.values[2] or result.values[1]))
+    end
+    return moved
+  end
+
+  local function findEmptyInternalTank()
+    for tank = 1, 8 do
+      local fluid = valueCall(devices.iohub, "getFluidInInternalTank", tank)
+      if type(fluid) ~= "table" or tonumber(fluid.amount or 0) <= 0 then return tank end
+    end
+    return nil
+  end
+
   local function proxy(kind, prefix)
     local address = componentAddress(kind, prefix)
     return component.proxy(address), address
@@ -589,7 +577,6 @@ function M.run(profile, configPath)
 
   local function initializeComponents()
     devices.iohub, addresses.iohub = proxy("iohub", config.ioHubAddress)
-    devices.dual, addresses.dual = proxy("dualhatch", config.dualHatchAddress)
     devices.database, addresses.database = proxy("database", config.databaseAddress)
     devices.machine, addresses.machine = proxy("gt_machine", config.gtMachineAddress)
     devices.gpu, addresses.gpu = proxy("gpu", config.gpuAddress)
@@ -598,12 +585,14 @@ function M.run(profile, configPath)
 
     validateMethods(addresses.iohub, "IO 枢纽", {
       "getStackInInternalSlot", "getFluidInInternalTank", "select", "count", "selectTank", "tankLevel",
-      "sendItems", "sendFluids", "getFluidsInNetwork", "getCraftables", "getCpus"
+      "sendItems", "sendFluids", "requestFluids", "fillRobot", "drainRobot", "getTankCount",
+      "getTankLevel", "getTankCapacity", "getFluidInTank", "getFluidsInNetwork", "getCraftables", "getCpus"
     })
-    validateMethods(addresses.dual, "OC 二合一输入枢纽",
-      { "addTask", "cancelTask", "submitTask", "isEmpty", "refund" })
     validateMethods(addresses.database, "数据库", { "get", "set" })
     validateMethods(addresses.machine, "gt_machine", { "getWorkProgress", "getWorkMaxProgress", "isMachineActive" })
+    if type(config.inputHatchSide) ~= "number" or config.inputHatchSide < 0 or config.inputHatchSide > 5 then
+      error("配置 inputHatchSide 必须是 sides.bottom/top/north/south/west/east 之一")
+    end
 
     local needed = math.max(config.databaseSlots.fluidCellStart + 6, config.databaseSlots.craftDrop,
       config.databaseSlots.plasmaProbe)
@@ -650,7 +639,7 @@ function M.run(profile, configPath)
 
   local phaseLabels = {
     SELF_TEST = "自检", WAIT_HINTS = "等待样板", RECYCLE_HINTS = "回收样板",
-    ENSURE_CRAFTED = "补充合成", VERIFY_STOCK = "库存复核", DISPATCH = "整批提交",
+    ENSURE_CRAFTED = "补充合成", VERIFY_STOCK = "库存复核", DISPATCH = "注入九重仓",
     WAIT_START = "等待开机", WAIT_COMPLETE = "等待完成", FAULT = "故障锁定"
   }
 
@@ -677,8 +666,8 @@ function M.run(profile, configPath)
       state.paused and "[已暂停]" or "", math.floor(state.machine.progress or 0),
       math.floor(state.machine.maximum or 0)),
       width - 2, state.machine.active and colors.good or colors.dim, colors.bg)
-    draw("components", 2, 5, string.format("IO %s  双输入 %s  DB %s  GT %s  样板 %d+%d",
-      short(addresses.iohub), short(addresses.dual), short(addresses.database), short(addresses.machine),
+    draw("components", 2, 5, string.format("IO %s  九重仓 side %d  DB %s  GT %s  样板 %d+%d",
+      short(addresses.iohub), config.inputHatchSide, short(addresses.database), short(addresses.machine),
       #state.snapshot.items, #state.snapshot.fluids), width - 2, colors.dim, colors.bg)
 
     local tableTop = 7
@@ -691,7 +680,7 @@ function M.run(profile, configPath)
       if requirement then
         text = fit(requirement.label, nameWidth) .. fit(formatNumber(requirement.amount), 14) ..
           fit(formatNumber(requirement.stock), 14) .. tostring(requirement.status or "等待")
-        if requirement.status == "就绪" then color = colors.good
+        if requirement.status == "就绪" or requirement.status == "已装载" then color = colors.good
         elseif requirement.status == "缺少样板" or requirement.status == "失败" then color = colors.bad
         elseif requirement.status == "合成中" then color = colors.warn end
       end
@@ -699,7 +688,8 @@ function M.run(profile, configPath)
     end
 
     local infoY = tableTop + 9
-    local faultText = state.fault and ("故障: " .. state.fault) or "安全策略: 未识别残留不会自动回送；提交异常会退款并锁定"
+    local faultText = state.fault and ("故障: " .. state.fault) or
+      "安全策略: 九重仓空仓装载；全部流体校验成功后才允许机器开工"
     draw("fault", 2, infoY, faultText, width - 3, state.fault and colors.bad or colors.dim, colors.bg)
 
     local logTop = math.max(infoY + 2, height - config.logLines - 2)
@@ -713,7 +703,7 @@ function M.run(profile, configPath)
       end
       draw("log" .. row, 2, logTop + row, text, width - 3, color, colors.bg)
     end
-    draw("footer", 1, height, "  Space 暂停/继续   R 安全重试/退款   Q/Esc 退出", width, colors.white, colors.header)
+    draw("footer", 1, height, "  Space 暂停/继续   R 安全恢复/回送   Q/Esc 退出", width, colors.white, colors.header)
   end
 
   local function buildRequirements(snapshot)
@@ -788,7 +778,7 @@ function M.run(profile, configPath)
     return sent
   end
 
-  local function sendFluidToAE(hint)
+  local function sendFluidToAE(hint, trackAsHint)
     local current = valueCall(devices.iohub, "getFluidInInternalTank", hint.slot)
     if current == nil or tonumber(current.amount or 0) <= 0 then return 0 end
     if current.name ~= hint.name then
@@ -800,8 +790,42 @@ function M.run(profile, configPath)
     if sent ~= before then
       error(string.format("流体槽 %d 回送 AE 不完整: %d/%d", hint.slot, sent, before))
     end
-    addRecycledFluid(current, sent)
+    if trackAsHint ~= false then addRecycledFluid(current, sent) end
     return sent
+  end
+
+  local function refundKnownInputsUnsafe()
+    local allowed = requirementNames()
+    local io = readSnapshot()
+    if #io.items > 0 then return false, "IO Hub 中存在物品，拒绝把它当作配方原料回送" end
+    for _, fluid in ipairs(io.fluids) do
+      if not allowed[fluid.name] then return false, "IO Hub 中存在未知流体 " .. tostring(fluid.name) end
+    end
+    for _, fluid in ipairs(io.fluids) do sendFluidToAE(fluid, false) end
+
+    local guard = 0
+    while true do
+      local hatch = inputHatchSnapshot()
+      if hatch.total == 0 then return true end
+      for _, fluid in ipairs(hatch.tanks) do
+        if not allowed[fluid.name] then return false, "九重输入仓中存在未知流体 " .. tostring(fluid.name) end
+      end
+      local selected = findEmptyInternalTank()
+      if not selected then return false, "IO Hub 没有空流体槽可回收九重仓" end
+      valueCall(devices.iohub, "selectTank", selected)
+      local moved = transferResult(resultCall(devices.iohub, "drainRobot", config.inputHatchSide,
+        hatch.tanks[1].amount), "drainRobot")
+      local sent = numberCall(devices.iohub, "sendFluids", moved) or 0
+      if sent ~= moved then return false, string.format("九重仓回送 AE 不完整: %d/%d L", sent, moved) end
+      guard = guard + 1
+      if guard > 128 then return false, "九重仓回送次数异常" end
+    end
+  end
+
+  local function refundKnownInputs()
+    local ok, result, reason = pcall(refundKnownInputsUnsafe)
+    if not ok then return false, tostring(result) end
+    return result, reason
   end
 
   local function isProductFluid(name)
@@ -813,7 +837,7 @@ function M.run(profile, configPath)
     local routed = false
     for _, fluid in ipairs(snapshot.fluids) do
       if isProductFluid(fluid.name) then
-        sendFluidToAE(fluid)
+        sendFluidToAE(fluid, false)
         log("info", "成品已送回主网: " .. fluidNameZh(fluid.name, fluid.label) .. " " ..
           formatNumber(fluid.amount) .. " L")
         routed = true
@@ -824,11 +848,9 @@ function M.run(profile, configPath)
 
   local function recycleStep()
     state.recycleTotals = state.recycleTotals or newRecycleTotals(state.hints)
+    if state.recycleQuietUntil and computer.uptime() < state.recycleQuietUntil then return end
     local snapshot = readSnapshot()
     if snapshotEmpty(snapshot) then
-      state.recycleQuietCount = state.recycleQuietCount + 1
-      if state.recycleQuietCount < config.recycleQuietSamples then return end
-
       local totalSnapshot = recycledSnapshot()
       local requirements, reason = buildRequirements(totalSnapshot)
       if not requirements then error("累计回送样板无效: " .. tostring(reason)) end
@@ -840,7 +862,7 @@ function M.run(profile, configPath)
       return
     end
 
-    state.recycleQuietCount = 0
+    state.recycleQuietUntil = nil
     for _, item in ipairs(snapshot.items) do
       if not state.recycleTotals.allowedItems[itemKey(item)] then
         error("回送期间出现未知物品: " .. tostring(item.label or item.name))
@@ -855,6 +877,7 @@ function M.run(profile, configPath)
     local sentItems, sentFluids = 0, 0
     for _, item in ipairs(snapshot.items) do sentItems = sentItems + sendItemToAE(item) end
     for _, fluid in ipairs(snapshot.fluids) do sentFluids = sentFluids + sendFluidToAE(fluid) end
+    state.recycleQuietUntil = computer.uptime() + config.recycleQuietSeconds
     state.recycleIndex = state.recycleIndex + 1
     writeJournal("recycling")
     log("info", string.format("整轮回送 IO: 物品 %d，流体 %d L", sentItems, sentFluids))
@@ -974,75 +997,88 @@ function M.run(profile, configPath)
     startCraft(requirement)
   end
 
-  local function refundDual()
-    if dualEmpty() then return true end
-    local result = resultCall(devices.dual, "refund")
-    if not result.ok or result.values[1] ~= true or not dualEmpty() then return false end
-    return true
-  end
-
   local function dispatch()
-    if not dualEmpty() then error("提交前 OC 二合一输入枢纽不为空") end
+    local hatch = inputHatchSnapshot()
+    if hatch.total > 0 then error("装载前九重输入仓不为空，拒绝覆盖现有流体") end
+    if hatch.count < #state.requirements then
+      error(string.format("输入仓只有 %d 个流体槽，配方需要 %d 种流体", hatch.count, #state.requirements))
+    end
     local stock = updateRequirementStock()
-    for _, requirement in ipairs(state.requirements) do
+    for index, requirement in ipairs(state.requirements) do
       if (stock[requirement.name] or 0) < requirement.amount then
         state.ensureIndex = 1
-        setPhase("ENSURE_CRAFTED", "提交前库存发生变化，重新补充")
+        setPhase("ENSURE_CRAFTED", "装载前库存发生变化，重新补充")
         return
+      end
+      local capacity = numberCall(devices.iohub, "getTankCapacity", config.inputHatchSide, index) or 0
+      if capacity < requirement.amount then
+        error(string.format("九重输入仓第 %d 槽容量不足: %d/%d L", index, capacity, requirement.amount))
       end
     end
 
-    local queuedIds = {}
-    writeJournal("queueing")
-    local queueOk, queueReason = pcall(function()
+    writeJournal("loading")
+    local loadOk, loadReason = pcall(function()
       for index, requirement in ipairs(state.requirements) do
         local slot = config.databaseSlots.fluidCellStart + index - 1
         local ok, reason = databaseCall(devices.database, "set", slot, UNIVERSAL_CELL_ID, 0,
           universalCellNbt(requirement.name))
         if not ok then error("写入通用流体单元失败: " .. tostring(reason)) end
-        -- DualInputHachOC reads UpgradeDatabase#getStackInSlot directly, so this
-        -- callback uses the Java inventory's zero-based index, unlike database.get/set.
-        local added = resultCall(devices.dual, "addTask", addresses.database, dualDatabaseIndex(slot),
-          requirement.amount, true)
-        local task = added.ok and added.values[1]
-        if type(task) ~= "table" or task.state ~= "added" or not task.id then
-          error("加入双输入任务失败: " .. requirement.label)
+
+        local remaining = requirement.amount
+        while remaining > 0 do
+          local internalTank = findEmptyInternalTank()
+          if not internalTank then error("IO Hub 没有空流体槽可用于装载") end
+          valueCall(devices.iohub, "selectTank", internalTank)
+          local requested = numberCall(devices.iohub, "requestFluids", addresses.database, slot, remaining) or 0
+          if requested <= 0 then error("从 AE 提取失败: " .. requirement.label) end
+          local moved = transferResult(resultCall(devices.iohub, "fillRobot", config.inputHatchSide, requested),
+            "fillRobot")
+          if moved ~= requested then
+            error(string.format("注入九重输入仓不完整: %s %d/%d L", requirement.label, moved, requested))
+          end
+          remaining = remaining - moved
         end
-        queuedIds[#queuedIds + 1] = task.id
+        requirement.status = "已装载"
+        log("info", string.format("已注入 %s %s L (%d/%d)", requirement.label,
+          formatNumber(requirement.amount), index, #state.requirements))
+        writeJournal("loading")
       end
     end)
-    if not queueOk then
-      for _, id in ipairs(queuedIds) do pcall(devices.dual.cancelTask, id) end
-      error(queueReason)
-    end
-
-    writeJournal("dispatching")
-    local submitted = resultCall(devices.dual, "submitTask")
-    if not submitted.ok then
-      for _, id in ipairs(queuedIds) do pcall(devices.dual.cancelTask, id) end
-      if not refundDual() then error("提交调用失败且退款失败: " .. submitted.error) end
-      error("提交调用失败，已取消队列并退款: " .. submitted.error)
-    end
-    local states = submitted.ok and submitted.values[1]
-    local allExecuted, summary = taskStatesSummary(states, #state.requirements)
-    if not allExecuted then
-      if type(states) == "table" then
-        for index, task in ipairs(states) do
-          local raw = type(task) == "table" and tostring(task.state or "error") or "无返回"
-          if raw ~= "executed" then
-            log("error", string.format("双输入任务 #%s: %s", tostring(type(task) == "table" and task.id or index),
-              taskStateZh[raw] or raw))
-          end
-        end
+    if not loadOk then
+      local loadMessage = tostring(loadReason):gsub("^.-:%d+:%s*", "", 1)
+      local currentMachine = machineData()
+      if currentMachine.progress > 0 or currentMachine.active then
+        state.observedConsumption = true
+        writeJournal("running")
+        setPhase("WAIT_COMPLETE", "装载后机器已启动，忽略迟到的校验错误")
+        return
       end
-      local refunded = refundDual()
-      if not refunded then error("双输入任务失败且退款失败: " .. summary .. "；禁止自动重试") end
-      error("双输入任务未全部执行: " .. summary .. taskFailureAdvice(states) .. "；已退款")
+      local refunded, refundReason = refundKnownInputs()
+      if not refunded then
+        error("九重仓装载失败且自动回送失败: " .. loadMessage .. "；" .. tostring(refundReason))
+      end
+      error("九重仓装载失败，已把本轮流体回送 AE: " .. loadMessage)
     end
 
-    writeJournal("dispatched")
+    local currentMachine = machineData()
+    hatch = inputHatchSnapshot()
+    if currentMachine.progress > 0 or currentMachine.active or hatch.total == 0 then
+      state.observedConsumption = true
+      writeJournal("running")
+      setPhase("WAIT_COMPLETE", "全部流体已注入，机器已接收配方")
+      return
+    end
+    local expectedTotal = 0
+    for _, requirement in ipairs(state.requirements) do
+      expectedTotal = expectedTotal + requirement.amount
+      if (hatch.byName[requirement.name] or 0) ~= requirement.amount then
+        error("九重输入仓装载校验失败: " .. requirement.label)
+      end
+    end
+    if hatch.total ~= expectedTotal then error("九重输入仓存在本轮之外的额外流体") end
+    writeJournal("loaded")
     state.observedConsumption = false
-    setPhase("WAIT_START", "全部流体已在同一 tick 提交")
+    setPhase("WAIT_START", "全部流体已逐种注入九重输入仓，等待机器自动识别")
   end
 
   local function finishCycle()
@@ -1054,7 +1090,7 @@ function M.run(profile, configPath)
     state.stableCount = 0
     state.partialSince = nil
     state.recycleIndex = 1
-    state.recycleQuietCount = 0
+    state.recycleQuietUntil = nil
     state.recycleTotals = nil
     state.ensureIndex = 1
     state.craft = nil
@@ -1064,37 +1100,27 @@ function M.run(profile, configPath)
   local function recoverJournal(record)
     state.hints = record.hints
     state.requirements = record.requirements or {}
-    state.recycleQuietCount = tonumber(record.recycleQuietCount) or 0
+    state.recycleQuietUntil = nil
     state.recycleTotals = record.recycleTotals
     local machine = machineData()
     local snapshot = readSnapshot()
+    local hatch = inputHatchSnapshot()
     if machine.progress > 0 or machine.active then
       state.observedConsumption = true
       setPhase("WAIT_COMPLETE", "从周期日志恢复运行中配方")
       return
     end
-    if record.stage == "queueing" or record.stage == "dispatching" then
-      local flushed = resultCall(devices.dual, "submitTask")
-      local states = flushed.ok and flushed.values[1]
-      local allExecuted, summary = taskStatesSummary(states, #state.requirements)
-      if allExecuted then
-        writeJournal("dispatched")
-        setPhase("WAIT_START", "已恢复并提交崩溃前的完整任务队列")
-        return
-      end
-      if summary and summary ~= "" then log("warn", "恢复提交结果: " .. summary) end
-      if not refundDual() then
-        fail("恢复未完成任务队列时退款失败")
-        return
-      end
+    if record.stage == "loading" then
+      local refunded, reason = refundKnownInputs()
+      if not refunded then return fail("恢复中断装载时回送失败: " .. tostring(reason)) end
       state.ensureIndex = 1
       writeJournal("recycled")
-      setPhase("ENSURE_CRAFTED", "未完成任务队列已清理并退款")
+      setPhase("ENSURE_CRAFTED", "中断的九重仓装载已回送 AE，重新复核库存")
       return
     end
-    if not dualEmpty() then
+    if record.stage == "loaded" and hatch.total > 0 then
       state.observedConsumption = false
-      setPhase("WAIT_START", "从周期日志恢复已提交配方")
+      setPhase("WAIT_START", "从周期日志恢复已装载的九重仓配方")
       return
     end
     if state.hints and snapshotSignature(snapshot) == snapshotSignature(state.hints) then
@@ -1107,19 +1133,20 @@ function M.run(profile, configPath)
       setPhase("RECYCLE_HINTS", "从周期日志恢复样板处理")
       return
     end
-    if snapshotEmpty(snapshot) and (record.stage == "recycled" or record.stage == "crafting") then
+    if snapshotEmpty(snapshot) and hatch.total == 0 and
+      (record.stage == "recycled" or record.stage == "crafting") then
       state.ensureIndex = 1
       setPhase("ENSURE_CRAFTED", "从周期日志恢复库存补充")
       return
     end
-    if snapshotEmpty(snapshot) and (record.stage == "dispatched" or record.stage == "running") then
+    if snapshotEmpty(snapshot) and hatch.total == 0 and record.stage == "running" then
       clearJournal()
       state.cycle = state.cycle + 1
       state.hints, state.requirements = nil, {}
       setPhase("WAIT_HINTS", "恢复时确认上一轮已被机器消耗")
       return
     end
-    fail("周期日志与当前 IO/机器状态不一致，按 R 尝试退款后人工检查")
+    fail("周期日志与当前 IO/九重仓/机器状态不一致，按 R 尝试安全回送后人工检查")
   end
 
   local function selfTest()
@@ -1130,8 +1157,8 @@ function M.run(profile, configPath)
     if record then
       log("warn", "检测到未完成周期日志，执行安全恢复")
       recoverJournal(record)
-    elseif not dualEmpty() then
-      fail("启动时 OC 二合一输入枢纽存在无归属残留")
+    elseif not inputHatchEmpty() then
+      fail("启动时九重输入仓存在无归属残留，拒绝自动覆盖或回送")
     else
       setPhase("WAIT_HINTS", "自检通过，等待机器输出样板")
     end
@@ -1166,7 +1193,7 @@ function M.run(profile, configPath)
     state.hints = snapshot
     state.requirements = requirements
     state.recycleIndex = 1
-    state.recycleQuietCount = 0
+    state.recycleQuietUntil = nil
     state.recycleTotals = nil
     writeJournal("captured")
     setPhase("RECYCLE_HINTS", "样板稳定且签名正确，开始回送 AE")
@@ -1174,7 +1201,7 @@ function M.run(profile, configPath)
 
   local function waitStartStep()
     local machine = machineData()
-    local empty = dualEmpty()
+    local empty = inputHatchEmpty()
     if machine.progress > 0 or machine.active or empty then
       state.observedConsumption = empty
       writeJournal("running")
@@ -1182,8 +1209,9 @@ function M.run(profile, configPath)
       return
     end
     if computer.uptime() - state.phaseSince > config.dispatchTimeout then
-      if not refundDual() then error("机器启动超时且退款失败") end
-      error("机器启动超时，原料已退款")
+      local refunded, reason = refundKnownInputs()
+      if not refunded then error("机器启动超时且九重仓回送失败: " .. tostring(reason)) end
+      error("机器启动超时，九重仓原料已回送 AE")
     end
   end
 
@@ -1196,14 +1224,15 @@ function M.run(profile, configPath)
       end
       return
     end
-    if state.observedConsumption and dualEmpty() then finishCycle() end
+    if state.observedConsumption and inputHatchEmpty() then finishCycle() end
   end
 
   local function retryOrRefund()
-    if not devices.dual then return end
-    if state.phase == "WAIT_START" or state.phase == "FAULT" then
-      if not refundDual() then
-        fail("人工重试退款失败，保持锁定")
+    if not devices.iohub then return end
+    if (state.phase == "WAIT_START" or state.phase == "FAULT") and #state.requirements > 0 then
+      local refunded, reason = refundKnownInputs()
+      if not refunded then
+        fail("人工恢复回送失败，保持锁定: " .. tostring(reason))
         return
       end
     end
@@ -1245,7 +1274,6 @@ function M.run(profile, configPath)
       end
     else
       pcall(machineData)
-      pcall(readSnapshot)
     end
     render()
     local signal = { event.pull(config.pollInterval) }

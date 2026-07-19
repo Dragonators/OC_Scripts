@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "exotic-iohub-v6"
+local releaseTag = "exotic-iohub-v7"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
     .. releaseTag .. "/src/ExoticIOHub/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -260,6 +260,13 @@ local function main()
     print("  cd " .. targetRoot)
     print("  quark")
     print("  magmatter")
+    for _, name in ipairs({ "exotic_quark.cfg", "exotic_magmatter.cfg" }) do
+        local path = filesystem.concat(targetRoot, name)
+        local content = readAll(path)
+        if content:find("dualHatchAddress", 1, true) and not content:find("inputHatchSide", 1, true) then
+            print("警告：" .. name .. " 是旧版双输入配置，请删除 dualHatchAddress，添加 inputHatchSide。")
+        end
+    end
 end
 
 local ok, reason = pcall(main)

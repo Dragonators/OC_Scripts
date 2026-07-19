@@ -52,7 +52,6 @@ end
 equal(api.fluidDropNbt("plasma.iron"), '{Fluid:"plasma.iron"}', "AE2FC droplet NBT")
 equal(api.universalCellNbt("plasma.iron"),
   '{Fluid:{FluidName:"plasma.iron",Amount:1000}}', "universal cell NBT")
-equal(api.dualDatabaseIndex(1), 0, "dual hatch database index is zero-based")
 equal(api.dropletNameZh("plasma.radon"), "氡等离子体液滴", "Chinese droplet name")
 equal(api.dropletNameZh("plasma.test_only", "服务器中文名"), "服务器中文名液滴",
   "server Chinese label fallback")
@@ -214,19 +213,6 @@ truthy(wrongDeltaReason:match("大于"), "MagMatter delta reason")
 
 local safeNbt = pcall(api.universalCellNbt, 'plasma.bad"name')
 equal(safeNbt, false, "unsafe fluid name rejected before NBT generation")
-
-truthy(api.allTasksExecuted({ { state = "executed" }, { state = "executed" } }, 2),
-  "all executed accepted")
-equal(api.allTasksExecuted({ { state = "executed" }, { state = "partially executed" } }, 2), false,
-  "partial submit rejected")
-equal(api.allTasksExecuted({ { state = "executed" } }, 2), false, "missing task result rejected")
-local stateOk, stateSummary = api.taskStatesSummary({
-  { id = 10, state = "executed" },
-  { id = 11, state = "me network disconnected" }
-}, 2)
-equal(stateOk, false, "disconnected task rejected")
-truthy(stateSummary:find("#11", 1, true) and stateSummary:find("AE 网络未连接", 1, true),
-  "task failure summary keeps the task id and Chinese reason")
 
 local signatureA = api.snapshotSignature({
   items = { { slot = 2, name = "b", damage = 0, size = 1 }, { slot = 1, name = "a", damage = 0, size = 1 } },
