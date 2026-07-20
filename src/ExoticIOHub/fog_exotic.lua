@@ -42,7 +42,7 @@ local timing = {
   transferYield = config.timing.transferYield or 0.05,
   returnVerifyDelay = config.timing.returnVerifyDelay or 0.1,
   advanceWarningAfter = config.timing.advanceWarningAfter or 30,
-  cycleSettle = config.timing.cycleSettle or 0.25,
+  cycleSettle = config.timing.cycleSettle or 0,
 }
 
 local MAX_INTERFACE_SLOTS = 6
@@ -679,17 +679,19 @@ local function waitForCycleAdvance()
     local snapshot = scanCache()
 
     if config.mode == "quark" then
-      if buildQuarkRequests(snapshot) then
+      local requests = buildQuarkRequests(snapshot)
+      if requests then
         log("已观察到下一轮完整提示，确认上一轮已被机器取用")
-        return
+        return snapshot, requests
       end
     else
       -- MagMatter supply contains the same Time/Space fluids as its hints, so
       -- never guess which amount is stale. Only a clean, valid next prompt is
       -- accepted as the machine-advance signal.
-      if buildMagmatterRequests(snapshot) then
+      local requests = buildMagmatterRequests(snapshot)
+      if requests then
         log("已观察到下一轮完整提示，确认上一轮已被机器取用")
-        return
+        return snapshot, requests
       end
     end
 
@@ -935,7 +937,6 @@ local function supplyAllRequests(requests)
 end
 
 local function processCycle(cycle)
-  prepareDatabase(cycle.requests)
   ui.requests = cycle.requests
   ui.current = 0
   ui.done = 0
@@ -955,16 +956,21 @@ local function processCycle(cycle)
     returnPromptsToMain(initialSnapshot)
     cycle.promptsReturned = true
   end
+  if not cycle.databasePrepared then
+    prepareDatabase(cycle.requests)
+    cycle.databasePrepared = true
+  end
 
   supplyAllRequests(cycle.requests)
   ui.current = #cycle.requests + 1
   ui.done = ui.total
   for _, request in ipairs(cycle.requests) do request.status = "等待取料" end
-  waitForCycleAdvance()
+  local nextSnapshot, nextRequests = waitForCycleAdvance()
   for _, request in ipairs(cycle.requests) do request.status = "已取用" end
   setState("本批完成", "已观察到下一轮完整提示；上一轮已确认取用")
   log("周期 " .. ui.cycle .. " 完成")
   os.sleep(timing.cycleSettle)
+  return nextSnapshot, nextRequests
 end
 
 local function main()
@@ -973,18 +979,25 @@ local function main()
   setState("自检完成", "正在等待机器生成提示")
 
   local stableSignature, stableCount = nil, 0
+  local carriedSnapshot, carriedRequests = nil, nil
   while true do
     if not machineAllowsWork() then
       stableSignature, stableCount = nil, 0
       setState("暂停：机器已禁用", "启用机器后自动继续")
       os.sleep(timing.poll)
     else
-      local snapshot = scanCache()
-      local requests, reason
-      if config.mode == "quark" then
-        requests, reason = buildQuarkRequests(snapshot)
+      local snapshot, requests, reason
+      local usingCarry = carriedSnapshot ~= nil
+      if usingCarry then
+        snapshot, requests = carriedSnapshot, carriedRequests
+        carriedSnapshot, carriedRequests = nil, nil
       else
-        requests, reason = buildMagmatterRequests(snapshot)
+        snapshot = scanCache()
+        if config.mode == "quark" then
+          requests, reason = buildQuarkRequests(snapshot)
+        else
+          requests, reason = buildMagmatterRequests(snapshot)
+        end
       end
 
       if not requests then
@@ -992,11 +1005,18 @@ local function main()
         setState("等待提示", reason)
         os.sleep(timing.poll)
       else
-        local signature = snapshotSignature(snapshot)
-        if signature == stableSignature then
-          stableCount = stableCount + 1
+        if usingCarry then
+          -- waitForCycleAdvance already proved this is a complete next prompt.
+          -- Reusing both the snapshot and parsed requests avoids two full sets
+          -- of synchronized transposer/database calls between cycles.
+          stableCount = timing.stableScans
         else
-          stableSignature, stableCount = signature, 1
+          local signature = snapshotSignature(snapshot)
+          if signature == stableSignature then
+            stableCount = stableCount + 1
+          else
+            stableSignature, stableCount = signature, 1
+          end
         end
 
         if stableCount < timing.stableScans then
@@ -1007,10 +1027,12 @@ local function main()
           local cycle = {requests = requests, promptsReturned = false, promptSnapshot = snapshot}
           local cycleFinished = false
           while not cycleFinished do
-            local ok, cycleError = pcall(processCycle, cycle)
+            local ok, nextSnapshot, nextRequests = pcall(processCycle, cycle)
             if ok then
               cycleFinished = true
+              carriedSnapshot, carriedRequests = nextSnapshot, nextRequests
             else
+              local cycleError = nextSnapshot
               log("周期故障：" .. tostring(cycleError))
               setState("故障暂停", "保留本批进度，修复后自动重试：" .. tostring(cycleError))
               pcall(clearInterface, interfaceSlotCount)

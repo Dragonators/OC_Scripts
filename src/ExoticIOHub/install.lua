@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "exotic-iohub-v10"
+local releaseTag = "exotic-iohub-v11"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
   .. releaseTag .. "/src/ExoticIOHub/"
 local targetRoot = shell.resolve((...) or "/home")
@@ -175,33 +175,42 @@ local function validateConfig(path, expectedMode)
   end
 end
 
--- v9 preserved user component addresses, but its default 1-2 second polling
--- values also kept the long gap between a completed cycle and prompt return.
--- Migrate only an unmarked v9-style timing block; custom non-default values
--- remain untouched.
+-- Preserve user component addresses while migrating only known v9/v10 default
+-- timing values. Custom non-default values remain untouched.
 local function migratePreservedConfig(path)
   local content = readAll(path)
-  if content:find("returnVerifyDelay%s*=") then return false end
+  local changed = false
 
   local function replaceDefault(pattern, replacement)
-    content = content:gsub(pattern, function(prefix, suffix)
+    local updated, count = content:gsub(pattern, function(prefix, suffix)
       return prefix .. replacement .. suffix
     end, 1)
+    if count > 0 then
+      content = updated
+      changed = true
+    end
   end
 
   replaceDefault("(\n%s*poll%s*=%s*)1(%s*,)", "0.25")
   replaceDefault("(\n%s*craftPoll%s*=%s*)1(%s*,)", "0.25")
-  replaceDefault("(\n%s*cycleSettle%s*=%s*)2(%s*,)", "0.25")
+  replaceDefault("(\n%s*cycleSettle%s*=%s*)2(%s*,)", "0")
+  replaceDefault("(\n%s*cycleSettle%s*=%s*)0%.25(%s*,)", "0")
 
   local indent = content:match("\n([ \t]*)cycleSettle%s*=")
-  if not indent then return false end
-  local additions = "\n" .. indent .. "interfaceSupplyGrace = 2,"
-    .. "\n" .. indent .. "transferYield = 0.05,"
-    .. "\n" .. indent .. "returnVerifyDelay = 0.1,"
-    .. "\n" .. indent .. "advanceWarningAfter = 30,"
-  content = content:gsub("(\n[ \t]*cycleSettle%s*=)", additions .. "%1", 1)
-  writeChecked(path, content)
-  return true
+  if indent and not content:find("returnVerifyDelay%s*=") then
+    local additions = "\n" .. indent .. "interfaceSupplyGrace = 2,"
+      .. "\n" .. indent .. "transferYield = 0.05,"
+      .. "\n" .. indent .. "returnVerifyDelay = 0.1,"
+    content = content:gsub("(\n[ \t]*cycleSettle%s*=)", additions .. "%1", 1)
+    changed = true
+  end
+  if indent and not content:find("advanceWarningAfter%s*=") then
+    content = content:gsub("(\n[ \t]*cycleSettle%s*=)",
+      "\n" .. indent .. "advanceWarningAfter = 30,%1", 1)
+    changed = true
+  end
+  if changed then writeChecked(path, content) end
+  return changed
 end
 
 local function validateStage()
@@ -289,7 +298,7 @@ local function stageFiles()
       io.write("保留现有 " .. spec.target .. " … ")
       copyChecked(currentPath, stagedPath)
       if spec.configMode and migratePreservedConfig(stagedPath) then
-        print("完成（已升级 v9 默认时序）")
+        print("完成（已升级 v9/v10 默认时序）")
       else
         print("完成")
       end

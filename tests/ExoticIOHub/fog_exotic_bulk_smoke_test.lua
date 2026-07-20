@@ -1,6 +1,10 @@
 local now = 0
 local active
 
+local function callbackTick()
+  if active and active.callbackDelay then now = now + active.callbackDelay end
+end
+
 local function cloneEntries(entries)
   local result = {}
   for slot, entry in pairs(entries) do
@@ -65,6 +69,7 @@ local databaseSlots = {}
 proxies[addresses.database] = {
   address = addresses.database,
   set = function(slot, name, damage, nbt)
+    callbackTick()
     local fluidName = tostring(nbt):match('Fluid:"([^"]+)"')
     if name == "gregtech:gt.metaitem.01" then
       fluidName = ({[31001] = "plasma.iron", [31002] = "plasma.copper"})[damage]
@@ -77,7 +82,10 @@ proxies[addresses.database] = {
     }
     return true
   end,
-  get = function(slot) return databaseSlots[slot] end,
+  get = function(slot)
+    callbackTick()
+    return databaseSlots[slot]
+  end,
 }
 
 local interface = { configured = {} }
@@ -90,6 +98,7 @@ end
 proxies[addresses.me_interface] = {
   address = addresses.me_interface,
   setFluidInterfaceConfiguration = function(slot, databaseAddress, databaseSlot)
+    callbackTick()
     if databaseAddress == nil then
       interface.configured[slot] = nil
       return true
@@ -102,10 +111,14 @@ proxies[addresses.me_interface] = {
     return true
   end,
   getFluidInterfaceConfiguration = function(slot)
+    callbackTick()
     local fluidName = interface.configured[slot]
     return fluidName and { fluid = { name = fluidName } } or nil
   end,
-  getCraftables = function() return {} end,
+  getCraftables = function()
+    callbackTick()
+    return {}
+  end,
 }
 
 local gpu = { address = addresses.gpu }
@@ -114,6 +127,10 @@ for _, method in ipairs({"setBackground", "setForeground", "fill", "setResolutio
 end
 gpu.maxResolution = function() return 160, 50 end
 gpu.set = function(_, _, value)
+  if value == "整批返主网" and active.completedCycles >= 1
+      and not active.secondPromptReturnStartedAt then
+    active.secondPromptReturnStartedAt = now
+  end
   if value == "本批完成" then
     active.completedCycles = active.completedCycles + 1
     if active.completedCycles == 1 then active.firstCycleCompletedAt = now end
@@ -145,16 +162,22 @@ end
 
 proxies[addresses.transposer] = {
   address = addresses.transposer,
-  getInventorySize = function(side) return side == CACHE_SIDE and 8 or 0 end,
+  getInventorySize = function(side)
+    callbackTick()
+    return side == CACHE_SIDE and 8 or 0
+  end,
   getStackInSlot = function(side, slot)
+    callbackTick()
     return side == CACHE_SIDE and active.cacheItems[slot] or nil
   end,
   getTankCount = function(side)
+    callbackTick()
     if side == MAIN_SIDE then return 6 end
     if side == CACHE_SIDE then return 8 end
     return 0
   end,
   getFluidInTank = function(side, tank)
+    callbackTick()
     if side == CACHE_SIDE then return active.cacheFluids[tank] end
     if side == MAIN_SIDE then
       local fluidName = interface.configured[tank - 1]
@@ -163,6 +186,7 @@ proxies[addresses.transposer] = {
     return nil
   end,
   transferItem = function(from, to, amount, slot)
+    callbackTick()
     assert(from == CACHE_SIDE and to == MAIN_SIDE, "prompt items must return to main network")
     local stack = assert(active.cacheItems[slot], "missing prompt item")
     local moved = math.min(amount, stack.size)
@@ -173,6 +197,7 @@ proxies[addresses.transposer] = {
     return true, moved
   end,
   transferFluid = function(from, to, amount, sourceTank)
+    callbackTick()
     if from == CACHE_SIDE and to == MAIN_SIDE then
       local tank = sourceTank + 1
       local fluid = assert(active.cacheFluids[tank], "missing prompt fluid")
@@ -213,6 +238,7 @@ local function runScenario(configPath, scenario)
   scenario.returnedFluids = 0
   scenario.returnedCycles = 0
   scenario.completedCycles = 0
+  scenario.secondPromptReturnStartedAt = nil
   scenario.maxConfigured = 0
   scenario.usedSixthSlot = false
   scenario.delivered = {}
@@ -239,6 +265,7 @@ local quark = {
   originalItems = quarkItems,
   originalFluids = {},
   advanceAfterSupply = 28 * 1296,
+  callbackDelay = 0.1,
   stopAfterSecondReturn = true,
 }
 runScenario("tests/ExoticIOHub/fog_exotic_bulk_quark.cfg", quark)
@@ -251,8 +278,12 @@ assert(quark.deliveredTotal == 28 * 1296,
   "quark plasma formula or resume accounting changed: " .. tostring(quark.deliveredTotal))
 assert(quark.maxConfigured == 6, "quark must configure six interface tanks in parallel")
 assert(quark.usedSixthSlot, "quark must actually transfer through interface tank 6")
-assert(quark.secondPromptReturnedAt - quark.firstCycleCompletedAt <= 0.6,
-  "next prompt return took too long: " .. tostring(quark.secondPromptReturnedAt - quark.firstCycleCompletedAt))
+assert(quark.secondPromptReturnStartedAt - quark.firstCycleCompletedAt <= 0.1,
+  "carried prompt was rescanned before return: "
+    .. tostring(quark.secondPromptReturnStartedAt - quark.firstCycleCompletedAt))
+assert(quark.secondPromptReturnedAt - quark.firstCycleCompletedAt <= 1.0,
+  "next prompt return took too long with synchronized callback cost: "
+    .. tostring(quark.secondPromptReturnedAt - quark.firstCycleCompletedAt))
 
 local omittedItems = {}
 for index, material in ipairs({"Gold", "Tin", "Lead", "Silver", "Nickel"}) do
@@ -311,5 +342,5 @@ assert(magmatter.deliveredTotal == 10 + 60 + (60 - 10) * 144,
 assert(magmatter.maxConfigured == 3, "MagMatter must configure all three fluids together")
 
 print(string.format(
-  "fog_exotic_bulk_smoke_test: false methods accepted; quark=6+1; Iron/Copper omitted; magmatter=3; next return=%.2fs",
+  "fog_exotic_bulk_smoke_test: false methods accepted; quark=6+1; Iron/Copper omitted; magmatter=3; delayed next return=%.2fs",
   quark.secondPromptReturnedAt - quark.firstCycleCompletedAt))

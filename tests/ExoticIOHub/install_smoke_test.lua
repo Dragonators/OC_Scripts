@@ -11,6 +11,18 @@ local files = {
   },
 }
 ]],
+  ["/home/fog_magmatter.cfg"] = [[return {
+  mode = "magmatter",
+  preserved = "v10",
+  components = { transposer = "v10-custom-address" },
+  timing = {
+    poll = 0.25,
+    returnVerifyDelay = 0.1,
+    advanceWarningAfter = 30,
+    cycleSettle = 0.25,
+  },
+}
+]],
   ["/home/exotic_quark.cfg"] = "legacy v8 config must remain untouched\n"
 }
 local directories = { ["/"] = true, ["/home"] = true }
@@ -124,7 +136,7 @@ package.preload.internet = function()
       if name == "fog_quark.cfg" then
         error("preserved config must not be downloaded")
       elseif name == "fog_magmatter.cfg" then
-        content = "return { mode = \"magmatter\", fresh = true }\n"
+        error("preserved config must not be downloaded")
       elseif name and name:sub(-4) == ".lua" then
         content = "return true\n"
       else
@@ -149,14 +161,16 @@ assert(files["/home/fog_quark.cfg"]:find("poll = 0.25", 1, true),
   "v9 default poll must be migrated")
 assert(files["/home/fog_quark.cfg"]:find("craftPoll = 0.25", 1, true),
   "v9 default craft poll must be migrated")
-assert(files["/home/fog_quark.cfg"]:find("cycleSettle = 0.25", 1, true),
-  "v9 default settle time must be migrated")
+assert(files["/home/fog_quark.cfg"]:find("cycleSettle = 0", 1, true),
+  "v9 default settle time must be removed")
 assert(files["/home/fog_quark.cfg"]:find("returnVerifyDelay = 0.1", 1, true),
   "v10 return verification timing must be added")
 assert(files["/home/fog_quark.cfg"]:find("advanceWarningAfter = 30", 1, true),
   "v10 machine-advance warning timing must be added")
-assert(files["/home/fog_magmatter.cfg"] == "return { mode = \"magmatter\", fresh = true }\n",
-  "missing MagMatter config must be installed")
+assert(files["/home/fog_magmatter.cfg"]:find('transposer = "v10-custom-address"', 1, true),
+  "existing v10 MagMatter component configuration must be preserved")
+assert(files["/home/fog_magmatter.cfg"]:find("cycleSettle = 0", 1, true),
+  "v10 default settle time must be removed")
 assert(files["/home/exotic_quark.cfg"] == "legacy v8 config must remain untouched\n",
   "v8 config must not be migrated or modified")
 for _, name in ipairs({
@@ -166,9 +180,9 @@ for _, name in ipairs({
   assert(files["/home/" .. name], "missing installed file: " .. name)
 end
 assert(files["/home/quark.lua"]:find("/home/fog_quark.cfg", 1, true),
-  "quark compatibility entry point must use the v10 config")
+  "quark compatibility entry point must use the v11 config")
 assert(files["/home/magmatter.lua"]:find("/home/fog_magmatter.cfg", 1, true),
-  "MagMatter compatibility entry point must use the v10 config")
+  "MagMatter compatibility entry point must use the v11 config")
 assert(not directories["/home/.fog-exotic-install-stage"], "stage directory must be removed")
 assert(not directories["/home/.fog-exotic-install-rollback"], "rollback directory must be removed")
 
@@ -213,4 +227,4 @@ recoveryRun("/home")
 assert(not directories["/home/.fog-exotic-install-stage"], "recovery must remove stage directory")
 assert(not directories["/home/.fog-exotic-install-rollback"], "recovery must remove rollback directory")
 
-print("install_smoke_test: v10 migration, config isolation, rollback and recovery passed")
+print("install_smoke_test: v9/v10 migration, config isolation, rollback and recovery passed")

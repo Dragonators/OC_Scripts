@@ -25,16 +25,17 @@
 
 ## 安装
 
-发布 `exotic-iohub-v10` 标签后，可在装有 Internet Card 的 OpenOS 电脑上直接替换 v8/v9：
+发布 `exotic-iohub-v11` 标签后，可在装有 Internet Card 的 OpenOS 电脑上直接替换 v8/v9/v10：
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v10/src/ExoticIOHub/install.lua /tmp/fog-exotic-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v11/src/ExoticIOHub/install.lua /tmp/fog-exotic-install.lua
 lua /tmp/fog-exotic-install.lua /home
 ```
 
 安装器使用暂存目录并在替换失败时回滚；已存在的新版 `fog_quark.cfg` 和
 `fog_magmatter.cfg` 会被保留。旧 v8 配置不会迁移，因为两代脚本的配置结构不同。
-安装器会在保留组件地址和方向的同时，把未修改的 v9 默认轮询参数升级为 v10 的快速时序。
+安装器会在保留组件地址和方向的同时，把未修改的 v9/v10 默认轮询与静置参数升级为
+v11 的直接提示交接时序。
 安装完成后，原有 `quark` / `magmatter` 命令会指向全新脚本；旧 `exotic_*` 文件不再被
 调用，但安装器不会擅自删除它们。
 
@@ -69,7 +70,7 @@ for name in pairs(component.methods("二合一接口地址")) do print(name) end
 
 ## 新工作流
 
-1. 等待完整提示，并连续扫描两次确认提示内容稳定。
+1. 脚本刚启动时等待完整提示，并连续扫描两次确认提示内容稳定；正常轮转时直接复用上一轮已经确认的下一轮完整提示，不再重新全槽扫描。
 2. 按实际 GT 代码计算目标流体：
    - 夸克：粉尘数量 × `1296 mB`；流体提示数量 × `1000 mB`。
    - 神锻可能显示铁粉/铜粉提示却从内部配方中丢失对应流体输入；因此铁、铜等离子体会在请求生成阶段直接忽略，绝不配置接口或送入缓存。
@@ -78,7 +79,7 @@ for name in pairs(component.methods("二合一接口地址")) do print(name) end
 4. 同时配置二合一接口的多个流体槽并快速轮询转入缓存；磁物质的 3 种流体一批完成，夸克最多 7 种流体，受接口 6 个流体槽的硬件限制拆成 `6 + 1` 两批。
 5. 主网不足时，各缺失流体的液滴样板合成会并行发起，而不是逐种等待完再处理下一种。
 6. 样板缺失时在 GUI 中显示由 GTNH `zh_CN` 语言键得到的中文名称，例如“铁等离子体液滴”，并定期重查。
-7. 补给完成后继续等待机器生成下一轮完整提示；只有看到这个直接确认信号才显示“本批完成”，随后立即把下一轮提示整批返回主网。
+7. 补给完成后继续等待机器生成下一轮完整提示；只有看到这个直接确认信号才显示“本批完成”。该快照和已解析请求直接交给下一周期，提示返网先于数据库准备，不再夹入两轮全槽扫描和额外静置。
 
 脚本不会取消 AE CPU 中的任务。合成超过警戒时间时只提示并继续等待，避免误取消其他玩家或其他自动化的订单。接口残留、返网受阻或缓存无法接收时也会暂停，而不会把物料改送到其他容器。
 
