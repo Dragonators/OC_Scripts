@@ -196,7 +196,6 @@ local BARTWORKS_DUST = {
 }
 
 local MAGMATTER_GT_DUST = {
-  [0] = "draconium",
   [2129] = "neutronium",
   [2329] = "tritanium",
   [2395] = "bedrockium",
@@ -462,6 +461,10 @@ local function snapshotSignature(snapshot)
 end
 
 local function plasmaFromItem(item)
+  if string.lower(tostring(item.name or "")) == "draconicevolution:draconiumdust" then
+    return "plasma.draconium"
+  end
+
   if item.name == "miscutils:itemDustDragonMetal" then
     return "plasma.dragonblood"
   end

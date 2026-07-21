@@ -25,10 +25,10 @@
 
 ## 安装
 
-发布 `exotic-iohub-v11` 标签后，可在装有 Internet Card 的 OpenOS 电脑上直接替换 v8/v9/v10：
+发布 `exotic-iohub-v12` 标签后，可在装有 Internet Card 的 OpenOS 电脑上直接替换 v8/v9/v10/v11。v12 修复了普通龙粉被错误识别为觉醒龙材料的问题：
 
 ```sh
-wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v11/src/ExoticIOHub/install.lua /tmp/fog-exotic-install.lua
+wget -f https://raw.githubusercontent.com/Dragonators/OC_Scripts/exotic-iohub-v12/src/ExoticIOHub/install.lua /tmp/fog-exotic-install.lua
 lua /tmp/fog-exotic-install.lua /home
 ```
 

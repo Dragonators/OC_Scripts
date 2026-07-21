@@ -324,7 +324,7 @@ assert(omitted.maxConfigured == 5,
 
 local magmatter = {
   originalItems = {
-    [1] = { name = "miscutils:itemDustIron", label = "Iron Dust", damage = 0, size = 1 },
+    [1] = { name = "DraconicEvolution:draconiumDust", label = "Draconium Dust", damage = 0, size = 1 },
   },
   originalFluids = {
     [1] = { name = "fluid.temporalfluid", label = "Temporal Fluid", amount = 10 },
@@ -339,6 +339,10 @@ assert(magmatter.returnedItems == 1 and magmatter.returnedFluids == 70,
   "MagMatter item/fluid prompts were not all returned")
 assert(magmatter.deliveredTotal == 10 + 60 + (60 - 10) * 144,
   "MagMatter amount formula changed")
+assert(magmatter.delivered["plasma.draconium"] == (60 - 10) * 144,
+  "Draconic Evolution Draconium Dust must request ordinary Draconium Plasma")
+assert(magmatter.delivered["plasma.draconiumawakened"] == nil,
+  "ordinary Draconium Dust must not request Awakened Draconium Plasma")
 assert(magmatter.maxConfigured == 3, "MagMatter must configure all three fluids together")
 
 print(string.format(

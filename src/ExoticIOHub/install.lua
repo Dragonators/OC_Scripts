@@ -6,7 +6,7 @@ local filesystem = require("filesystem")
 local internet = require("internet")
 local shell = require("shell")
 
-local releaseTag = "exotic-iohub-v11"
+local releaseTag = "exotic-iohub-v12"
 local baseUrl = "https://raw.githubusercontent.com/Dragonators/OC_Scripts/"
   .. releaseTag .. "/src/ExoticIOHub/"
 local targetRoot = shell.resolve((...) or "/home")
